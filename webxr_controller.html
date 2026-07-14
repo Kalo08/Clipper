@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quest Controller → Servo (UDP/WebTransport)</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0d;
+      color: #e0e0e0;
+      font-family: 'Segoe UI', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      gap: 16px;
+      padding: 24px;
+    }
+
+    h1  { font-size: 1.4rem; color: #7df3ff; letter-spacing: 1px; }
+    h1 small { font-size: 0.7rem; color: #555; margin-left: 6px; }
+
+    #status-bar {
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 10px;
+      padding: 10px 20px;
+      text-align: center;
+      width: 100%;
+      max-width: 440px;
+      font-size: 0.82rem;
+    }
+
+    .dot {
+      display: inline-block; width: 9px; height: 9px;
+      border-radius: 50%; margin-right: 6px; background: #555;
+    }
+    .dot.green  { background: #4eff91; box-shadow: 0 0 6px #4eff91; }
+    .dot.yellow { background: #ffe44e; box-shadow: 0 0 6px #ffe44e; }
+    .dot.red    { background: #ff4e4e; box-shadow: 0 0 6px #ff4e4e; }
+
+    .card {
+      background: #111827;
+      border: 1px solid #2a2a3e;
+      border-radius: 12px;
+      padding: 14px 18px;
+      width: 100%;
+      max-width: 440px;
+    }
+    .card h2 {
+      font-size: 0.75rem; color: #666; margin-bottom: 10px;
+      text-transform: uppercase; letter-spacing: 1px;
+    }
+
+    .servo-row { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+    .servo-label { width: 28px; font-size: 0.78rem; color: #aaa; }
+    .servo-track { flex: 1; height: 7px; background: #222; border-radius: 4px; overflow: hidden; }
+    .servo-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #7df3ff, #a78bfa);
+      border-radius: 4px; width: 50%;
+      transition: width 0.04s linear;
+    }
+    .servo-val { width: 36px; font-size: 0.82rem; text-align: right; color: #ccc; }
+
+    /* Config grid */
+    .cfg-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 6px 10px;
+      align-items: center;
+      width: 100%;
+      max-width: 440px;
+      font-size: 0.82rem;
+    }
+    .cfg-grid label { color: #888; white-space: nowrap; }
+    .cfg-grid input {
+      background: #1a1a2e; border: 1px solid #333; color: #e0e0e0;
+      padding: 5px 9px; border-radius: 6px; width: 100%; font-size: 0.82rem;
+    }
+
+    .btn-row { display: flex; gap: 10px; width: 100%; max-width: 440px; }
+
+    button {
+      flex: 1;
+      padding: 11px;
+      border-radius: 8px;
+      border: 1px solid #555;
+      background: #1a1a2e;
+      color: #ccc;
+      cursor: pointer;
+      font-size: 0.88rem;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: #252540; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button.primary {
+      border-color: #7df3ff88; color: #7df3ff;
+      background: linear-gradient(135deg, #7df3ff11, #a78bfa11);
+    }
+    button.primary:hover:not(:disabled) {
+      background: linear-gradient(135deg, #7df3ff22, #a78bfa22);
+    }
+
+    #stats {
+      font-size: 0.7rem; color: #444;
+      width: 100%; max-width: 440px;
+      display: flex; gap: 16px; justify-content: center;
+    }
+
+    #log {
+      font-size: 0.7rem; color: #555;
+      width: 100%; max-width: 440px;
+      max-height: 80px; overflow-y: auto;
+      font-family: monospace;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Quest → Servo <small>WebTransport / QUIC</small></h1>
+
+  <!-- ── Config ─────────────────────────────────────── -->
+  <div class="cfg-grid">
+    <label>Pi IP</label>
+    <input id="cfg-ip"   value="192.168.1.100" placeholder="Raspberry Pi LAN IP" />
+    <label>Port</label>
+    <input id="cfg-port" value="4433"          placeholder="4433" />
+    <label>Cert hash (base64)</label>
+    <input id="cfg-hash" value=""
+           placeholder="Paste from: python setup_cert.py" />
+    <label>Send rate (Hz)</label>
+    <input id="cfg-hz"   value="60"            placeholder="60" />
+    <label>Controller</label>
+    <input id="cfg-hand" value="right"         placeholder="right | left" />
+  </div>
+
+  <!-- ── Status ─────────────────────────────────────── -->
+  <div id="status-bar">
+    <span class="dot" id="wt-dot"></span><span id="wt-label">WebTransport: disconnected</span>
+    &nbsp;&nbsp;
+    <span class="dot" id="xr-dot"></span><span id="xr-label">XR: inactive</span>
+  </div>
+
+  <!-- ── Servo bars ─────────────────────────────────── -->
+  <div class="card">
+    <h2>Live Servo Angles</h2>
+    <div class="servo-row">
+      <span class="servo-label">S1</span>
+      <div class="servo-track"><div class="servo-fill" id="bar-s1"></div></div>
+      <span class="servo-val" id="val-s1">90°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S2</span>
+      <div class="servo-track"><div class="servo-fill" id="bar-s2"></div></div>
+      <span class="servo-val" id="val-s2">90°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S3</span>
+      <div class="servo-track"><div class="servo-fill" id="bar-s3"></div></div>
+      <span class="servo-val" id="val-s3">90°</span>
+    </div>
+  </div>
+
+  <!-- ── Buttons ────────────────────────────────────── -->
+  <div class="btn-row">
+    <button id="btn-connect" class="primary">Connect</button>
+    <button id="btn-enter"   class="primary" disabled>Enter VR</button>
+    <button id="btn-disconnect" disabled>Disconnect</button>
+  </div>
+
+  <!-- ── Stats ─────────────────────────────────────── -->
+  <div id="stats">
+    <span>Sent: <b id="st-sent">0</b></span>
+    <span>Dropped: <b id="st-drop">0</b></span>
+    <span>Rate: <b id="st-rate">0</b> Hz</span>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────────
+// Logging
+// ─────────────────────────────────────────────────────────────────────────────
+const logEl = document.getElementById("log");
+function log(msg) {
+  const d = document.createElement("div");
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.prepend(d);
+  while (logEl.children.length > 40) logEl.lastChild.remove();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dot / status helpers
+// ─────────────────────────────────────────────────────────────────────────────
+const setDot = (id, color, text, labelId) => {
+  document.getElementById(id).className = `dot ${color}`;
+  document.getElementById(labelId).textContent = text;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Servo UI
+// ─────────────────────────────────────────────────────────────────────────────
+function updateServoUI(s1, s2, s3) {
+  const set = (bar, val, a) => {
+    document.getElementById(bar).style.width = `${(a / 180) * 100}%`;
+    document.getElementById(val).textContent  = `${a}°`;
+  };
+  set("bar-s1", "val-s1", s1);
+  set("bar-s2", "val-s2", s2);
+  set("bar-s3", "val-s3", s3);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Packet encoding
+// Uses compact binary: 3 bytes [s1, s2, s3] — smallest possible datagram
+// ─────────────────────────────────────────────────────────────────────────────
+function encodeServos(s1, s2, s3) {
+  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Math
+// ─────────────────────────────────────────────────────────────────────────────
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function quatToEulerDeg(q) {
+  const { x, y, z, w } = q;
+  const roll  = Math.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y));
+  const sinp  = 2*(w*y - z*x);
+  const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp)*Math.PI/2 : Math.asin(sinp);
+  const yaw   = Math.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z));
+  const d     = r => r * (180 / Math.PI);
+  return [d(yaw), d(pitch), d(roll)];
+}
+
+const yawToServo   = deg => clamp(Math.round((deg + 180) / 360 * 180), 0, 180);
+const pitchToServo = deg => clamp(Math.round((deg +  90) / 180 * 180), 0, 180);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WebTransport (QUIC datagrams ≈ UDP)
+// ─────────────────────────────────────────────────────────────────────────────
+let transport    = null;
+let datagramWriter = null;
+let sentCount    = 0;
+let dropCount    = 0;
+let rateTimer    = null;
+let sentLastSec  = 0;
+
+async function connectWT() {
+  const ip   = document.getElementById("cfg-ip").value.trim();
+  const port = document.getElementById("cfg-port").value.trim();
+  const b64  = document.getElementById("cfg-hash").value.trim();
+  const url  = `https://${ip}:${port}/servo`;
+
+  if (!b64) {
+    log("ERROR: Cert hash is empty — run  python setup_cert.py  on the Pi first.");
+    return;
+  }
+
+  // Decode base64 → ArrayBuffer for serverCertificateHashes
+  const raw  = atob(b64);
+  const buf  = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+
+  setDot("wt-dot", "yellow", "WebTransport: connecting…", "wt-label");
+  log(`Connecting to ${url} …`);
+
+  try {
+    transport = new WebTransport(url, {
+      serverCertificateHashes: [{ algorithm: "sha-256", value: buf.buffer }],
+      congestionControl: "low-latency",   // hint: prefer low latency over throughput
+    });
+
+    await transport.ready;
+
+    setDot("wt-dot", "green", `WebTransport: ${ip}:${port}`, "wt-label");
+    log("WebTransport ready (QUIC datagrams active).");
+
+    document.getElementById("btn-connect").disabled    = true;
+    document.getElementById("btn-disconnect").disabled = false;
+    document.getElementById("btn-enter").disabled      = false;
+
+    // Datagram writer — fire-and-forget, no retransmit
+    datagramWriter = transport.datagrams.writable.getWriter();
+
+    transport.closed.then(() => {
+      log("WebTransport closed.");
+      onDisconnect();
+    }).catch(err => {
+      log(`WebTransport error: ${err.message}`);
+      onDisconnect();
+    });
+
+    // Stats update every second
+    rateTimer = setInterval(() => {
+      document.getElementById("st-rate").textContent = sentLastSec;
+      sentLastSec = 0;
+    }, 1000);
+
+  } catch (err) {
+    log(`Connection failed: ${err.message}`);
+    setDot("wt-dot", "red", "WebTransport: failed", "wt-label");
+    transport = null;
+  }
+}
+
+function disconnectWT() {
+  if (transport) transport.close();
+}
+
+function onDisconnect() {
+  transport      = null;
+  datagramWriter = null;
+  clearInterval(rateTimer);
+  setDot("wt-dot", "red", "WebTransport: disconnected", "wt-label");
+  document.getElementById("btn-connect").disabled    = false;
+  document.getElementById("btn-disconnect").disabled = true;
+  document.getElementById("btn-enter").disabled      = true;
+}
+
+async function sendDatagram(s1, s2, s3) {
+  if (!datagramWriter) return;
+  try {
+    // Non-blocking write — drop if queue is full (true UDP-like behaviour)
+    await datagramWriter.write(encodeServos(s1, s2, s3));
+    sentCount++;
+    sentLastSec++;
+    document.getElementById("st-sent").textContent = sentCount;
+  } catch (_) {
+    dropCount++;
+    document.getElementById("st-drop").textContent = dropCount;
+  }
+}
+
+document.getElementById("btn-connect").addEventListener("click", connectWT);
+document.getElementById("btn-disconnect").addEventListener("click", disconnectWT);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WebXR session
+// ─────────────────────────────────────────────────────────────────────────────
+let xrSession  = null;
+let xrRefSpace = null;
+let lastSendTime = 0;
+
+const btnEnter = document.getElementById("btn-enter");
+
+btnEnter.addEventListener("click", async () => {
+  if (!navigator.xr) {
+    log("WebXR not available — use the Meta Quest Browser.");
+    return;
+  }
+  try {
+    xrSession  = await navigator.xr.requestSession("immersive-vr", {
+      optionalFeatures: ["local-floor"],
+    });
+    xrRefSpace = await xrSession.requestReferenceSpace("local-floor").catch(
+      () => xrSession.requestReferenceSpace("local")
+    );
+
+    setDot("xr-dot", "green", "XR: active", "xr-label");
+    btnEnter.disabled = true;
+    log("XR session started.");
+
+    xrSession.addEventListener("end", () => {
+      setDot("xr-dot", "red", "XR: ended", "xr-label");
+      btnEnter.disabled = false;
+      xrSession = null; xrRefSpace = null;
+      log("XR session ended.");
+    });
+
+    xrSession.requestAnimationFrame(onXRFrame);
+  } catch (err) {
+    log(`XR error: ${err.message}`);
+    setDot("xr-dot", "red", "XR: failed", "xr-label");
+  }
+});
+
+function onXRFrame(time, frame) {
+  if (!xrSession) return;
+  xrSession.requestAnimationFrame(onXRFrame);
+
+  const hand   = document.getElementById("cfg-hand").value.trim() || "right";
+  const hz     = Math.max(1, Math.min(120, parseInt(document.getElementById("cfg-hz").value) || 60));
+  const minGap = 1000 / hz;
+
+  const src = Array.from(frame.session.inputSources).find(s => s.handedness === hand);
+  if (!src?.gripSpace) return;
+
+  const pose = frame.getPose(src.gripSpace, xrRefSpace);
+  if (!pose) return;
+
+  const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
+  const s1 = yawToServo(yaw);
+  const s2 = pitchToServo(pitch);
+  const s3 = yawToServo(roll);
+
+  updateServoUI(s1, s2, s3);
+
+  if (time - lastSendTime >= minGap) {
+    sendDatagram(s1, s2, s3);   // fire-and-forget datagram
+    lastSendTime = time;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Boot check
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener("load", async () => {
+  if (typeof WebTransport === "undefined") {
+    log("WebTransport API not found. Use Meta Quest Browser (v50+).");
+    document.getElementById("btn-connect").disabled = true;
+    return;
+  }
+  log("WebTransport API available.");
+
+  if (!navigator.xr) {
+    log("WebXR not available on this browser.");
+    return;
+  }
+  const ok = await navigator.xr.isSessionSupported("immersive-vr");
+  log(ok ? "Immersive VR supported — ready." : "Immersive VR not supported.");
+});
+</script>
+</body>
+</html>
