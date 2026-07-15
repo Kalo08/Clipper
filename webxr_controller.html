@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Quest Controller → Stepper (UDP/WebTransport)</title>
+  <title>Quest Controller → Servo (UDP/WebTransport)</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -121,7 +121,7 @@
 </head>
 <body>
 
-  <h1>Quest → Stepper <small>WebTransport / QUIC</small></h1>
+  <h1>Quest → Servo <small>WebTransport / QUIC</small></h1>
 
   <!-- ── Config ─────────────────────────────────────── -->
   <div class="cfg-grid">
@@ -145,9 +145,9 @@
     <span class="dot" id="xr-dot"></span><span id="xr-label">XR: inactive</span>
   </div>
 
-  <!-- ── Stepper bars ─────────────────────────────────── -->
+  <!-- ── Servo bars ─────────────────────────────────── -->
   <div class="card">
-    <h2>Live Stepper Angles</h2>
+    <h2>Live Servo Angles</h2>
     <div class="servo-row">
       <span class="servo-label">S1</span>
       <div class="servo-track"><div class="servo-fill" id="bar-s1"></div></div>
@@ -178,7 +178,9 @@
   </div>
 
   <div class="btn-row">
-    <button id="btn-spin1" class="primary" disabled>Spin Stepper 1</button>
+    <button id="btn-spin-s1" class="primary" disabled>Spin S1</button>
+    <button id="btn-spin-s2" class="primary" disabled>Spin S2</button>
+    <button id="btn-spin-s3" class="primary" disabled>Spin S3</button>
   </div>
 
   <!-- ── Stats ─────────────────────────────────────── -->
@@ -301,7 +303,9 @@ async function connectWT() {
     document.getElementById("btn-connect").disabled    = true;
     document.getElementById("btn-disconnect").disabled = false;
     document.getElementById("btn-enter").disabled      = false;
-    document.getElementById("btn-spin1").disabled      = false;
+    document.getElementById("btn-spin-s1").disabled    = false;
+    document.getElementById("btn-spin-s2").disabled    = false;
+    document.getElementById("btn-spin-s3").disabled    = false;
 
     // Datagram writer — fire-and-forget, no retransmit
     datagramWriter = transport.datagrams.writable.getWriter();
@@ -339,16 +343,24 @@ function onDisconnect() {
   document.getElementById("btn-connect").disabled    = false;
   document.getElementById("btn-disconnect").disabled = true;
   document.getElementById("btn-enter").disabled      = true;
-  document.getElementById("btn-spin1").disabled      = true;
+  document.getElementById("btn-spin-s1").disabled    = true;
+  document.getElementById("btn-spin-s2").disabled    = true;
+  document.getElementById("btn-spin-s3").disabled    = true;
 }
 
-function spinStepper1() {
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-channel "spin" test buttons — sends a single command byte that tells the
+// Pi to sweep that one servo through its range, independent of live tracking.
+// ─────────────────────────────────────────────────────────────────────────────
+const SPIN_CMD = { s1: 0x02, s2: 0x03, s3: 0x04 };
+
+function spinServo(channel) {
   if (!datagramWriter) {
     log("Not connected — click Connect first.");
     return;
   }
-  datagramWriter.write(new Uint8Array([0x01]));
-  log("Sent: spin stepper 1");
+  datagramWriter.write(new Uint8Array([SPIN_CMD[channel]]));
+  log(`Sent: spin servo ${channel.toUpperCase()}`);
 }
 
 async function sendDatagram(s1, s2, s3, strength) {
@@ -367,7 +379,9 @@ async function sendDatagram(s1, s2, s3, strength) {
 
 document.getElementById("btn-connect").addEventListener("click", connectWT);
 document.getElementById("btn-disconnect").addEventListener("click", disconnectWT);
-document.getElementById("btn-spin1").addEventListener("click", spinStepper1);
+document.getElementById("btn-spin-s1").addEventListener("click", () => spinServo("s1"));
+document.getElementById("btn-spin-s2").addEventListener("click", () => spinServo("s2"));
+document.getElementById("btn-spin-s3").addEventListener("click", () => spinServo("s3"));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebXR session
@@ -475,7 +489,7 @@ function updateHudTexture(gl, s1, s2, s3, strength) {
 
   ctx.fillStyle = "#7df3ff";
   ctx.font = "bold 26px monospace";
-  ctx.fillText("QUEST → STEPPER", 20, 40);
+  ctx.fillText("QUEST → SERVO", 20, 40);
 
   ctx.font = "20px monospace";
   ctx.fillStyle = "#e0e0e0";

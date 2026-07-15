@@ -143,6 +143,21 @@ def bar(a: int, w: int = 16) -> str:
     return f"[{'#'*n}{'-'*(w-n)}]{a:>4}°"
 
 
+# ── Per-channel servo "spin" test ────────────────────────────────────────────
+SERVO_SPIN_CMDS = {0x02: "s1", 0x03: "s2", 0x04: "s3"}
+
+
+def sweep_servo(key: str, delay: float = 0.01):
+    """Blocking sweep 90 -> 0 -> 180 -> 90 — run off the event loop (see run_in_executor call site)."""
+    if SIMULATE:
+        log.info(f"SIMULATE: would sweep servo {key}.")
+        return
+    for angle in list(range(90, -1, -2)) + list(range(0, 181, 2)) + list(range(180, 89, -2)):
+        move_servo(key, angle)
+        time.sleep(delay)
+    log.info(f"Servo {key.upper()} sweep complete.")
+
+
 # ── Stepper 1 (A4988) ─────────────────────────────────────────────────────────
 
 def init_stepper1():
@@ -177,9 +192,14 @@ def handle_packet(data: bytes):
     global pkt_count
 
     if len(data) == 1:
-        if data[0] == 0x01:
+        cmd = data[0]
+        if cmd == 0x01:
             log.info("Command received: spin stepper 1")
             asyncio.get_event_loop().run_in_executor(None, spin_stepper1)
+        elif cmd in SERVO_SPIN_CMDS:
+            key = SERVO_SPIN_CMDS[cmd]
+            log.info(f"Command received: spin servo {key.upper()}")
+            asyncio.get_event_loop().run_in_executor(None, sweep_servo, key)
         return
 
     if len(data) < 3:
