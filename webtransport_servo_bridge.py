@@ -3,10 +3,12 @@ WebTransport (QUIC) → Servo Bridge
 Receives compact binary datagrams from the Meta Quest WebXR page
 and drives GPIO servos on a Raspberry Pi 3.
 
-Packet format (3 bytes, matches webxr_controller.html):
-    byte 0 → S1 angle  (0–180)  pan  / yaw
-    byte 1 → S2 angle  (0–180)  tilt / pitch
-    byte 2 → S3 angle  (0–180)  roll
+Packet format (matches webxr_controller.html):
+    1 byte  → command byte (0x01 = spin stepper 1 one revolution)
+    3 bytes → servo angles [S1, S2, S3], each 0-180
+        byte 0 → S1 angle  (0–180)  pan  / yaw
+        byte 1 → S2 angle  (0–180)  tilt / pitch
+        byte 2 → S3 angle  (0–180)  roll
 
 Dependencies (install on the Pi):
     pip install aioquic RPi.GPIO
@@ -69,6 +71,12 @@ PWM_FREQ   = 50     # Hz
 DUTY_MIN   = 2.5    # % → 0°
 DUTY_MAX   = 12.5   # % → 180°
 
+# A4988 stepper driver — stepper 1 (BCM numbering)
+STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
+DIR1_PIN        = 24   # physical pin 18 — A4988 DIR
+STEPPER1_STEPS  = 200  # steps per full revolution (1.8°/step motor, full-step mode)
+STEPPER1_DELAY  = 0.002  # seconds per half-pulse — lower = faster spin
+
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -122,9 +130,45 @@ def bar(a: int, w: int = 16) -> str:
     return f"[{'#'*n}{'-'*(w-n)}]{a:>4}°"
 
 
+# ── Stepper 1 (A4988) ─────────────────────────────────────────────────────────
+
+def init_stepper1():
+    if SIMULATE:
+        return
+    GPIO.setup(STEP1_PIN, GPIO.OUT)
+    GPIO.setup(DIR1_PIN, GPIO.OUT)
+    GPIO.output(STEP1_PIN, GPIO.LOW)
+    GPIO.output(DIR1_PIN, GPIO.HIGH)
+    log.info(f"  GPIO {STEP1_PIN} → STEP1, GPIO {DIR1_PIN} → DIR1 initialised")
+
+
+def spin_stepper1(steps: int = STEPPER1_STEPS, delay: float = STEPPER1_DELAY):
+    """Blocking step loop — run this off the asyncio event loop (see run_in_executor call site)."""
+    if SIMULATE:
+        log.info(f"SIMULATE: would spin stepper 1 for {steps} steps.")
+        return
+    for _ in range(steps):
+        GPIO.output(STEP1_PIN, GPIO.HIGH)
+        time.sleep(delay)
+        GPIO.output(STEP1_PIN, GPIO.LOW)
+        time.sleep(delay)
+    log.info(f"Stepper 1 spun {steps} steps.")
+
+
 def handle_packet(data: bytes):
-    """Decode 3-byte servo packet and apply angles."""
+    """
+    Decode an incoming datagram.
+      1 byte  -> command byte (0x01 = spin stepper 1 one revolution)
+      3 bytes -> servo angle packet [s1, s2, s3]
+    """
     global pkt_count
+
+    if len(data) == 1:
+        if data[0] == 0x01:
+            log.info("Command received: spin stepper 1")
+            asyncio.get_event_loop().run_in_executor(None, spin_stepper1)
+        return
+
     if len(data) < 3:
         return
 
@@ -219,6 +263,7 @@ async def main():
     config.load_cert_chain(str(CERT_FILE), str(KEY_FILE))
 
     init_servos()
+    init_stepper1()
 
     print(f"\n{'=' * 62}")
     print(f"  WebTransport Servo Bridge  (QUIC / UDP-like datagrams)")
@@ -227,6 +272,9 @@ async def main():
     print(f"\n  Servo GPIO map:")
     for k, pin in SERVO_PINS.items():
         print(f"    {k.upper()} → GPIO {pin} (BCM)")
+    print(f"\n  Stepper 1 (A4988) GPIO map:")
+    print(f"    STEP1 → GPIO {STEP1_PIN} (BCM)")
+    print(f"    DIR1  → GPIO {DIR1_PIN} (BCM)")
     print(f"\n  Steps:")
     print(f"    1. Find Pi IP:   hostname -I")
     print(f"    2. Open webxr_controller.html on the Quest Browser")

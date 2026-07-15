@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Quest Controller → Servo (UDP/WebTransport)</title>
+  <title>Quest Controller → Stepper (UDP/WebTransport)</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -121,16 +121,16 @@
 </head>
 <body>
 
-  <h1>Quest → Servo <small>WebTransport / QUIC</small></h1>
+  <h1>Quest → Stepper <small>WebTransport / QUIC</small></h1>
 
   <!-- ── Config ─────────────────────────────────────── -->
   <div class="cfg-grid">
     <label>Pi IP</label>
-    <input id="cfg-ip"   value="192.168.1.100" placeholder="Raspberry Pi LAN IP" />
+    <input id="cfg-ip"   value="172.20.10.7" placeholder="Raspberry Pi LAN IP" />
     <label>Port</label>
     <input id="cfg-port" value="4433"          placeholder="4433" />
     <label>Cert hash (base64)</label>
-    <input id="cfg-hash" value=""
+    <input id="cfg-hash" value="NtudMkkERYKhVJcwg428GRSGNX+10IlK9QGzoPLfesE="
            placeholder="Paste from: python setup_cert.py" />
     <label>Send rate (Hz)</label>
     <input id="cfg-hz"   value="60"            placeholder="60" />
@@ -145,9 +145,9 @@
     <span class="dot" id="xr-dot"></span><span id="xr-label">XR: inactive</span>
   </div>
 
-  <!-- ── Servo bars ─────────────────────────────────── -->
+  <!-- ── Stepper bars ─────────────────────────────────── -->
   <div class="card">
-    <h2>Live Servo Angles</h2>
+    <h2>Live Stepper Angles</h2>
     <div class="servo-row">
       <span class="servo-label">S1</span>
       <div class="servo-track"><div class="servo-fill" id="bar-s1"></div></div>
@@ -163,6 +163,11 @@
       <div class="servo-track"><div class="servo-fill" id="bar-s3"></div></div>
       <span class="servo-val" id="val-s3">90°</span>
     </div>
+    <div class="servo-row">
+      <span class="servo-label">STR</span>
+      <div class="servo-track"><div class="servo-fill" id="bar-str"></div></div>
+      <span class="servo-val" id="val-str">0.00</span>
+    </div>
   </div>
 
   <!-- ── Buttons ────────────────────────────────────── -->
@@ -170,6 +175,10 @@
     <button id="btn-connect" class="primary">Connect</button>
     <button id="btn-enter"   class="primary" disabled>Enter AR</button>
     <button id="btn-disconnect" disabled>Disconnect</button>
+  </div>
+
+  <div class="btn-row">
+    <button id="btn-spin1" class="primary" disabled>Spin Stepper 1</button>
   </div>
 
   <!-- ── Stats ─────────────────────────────────────── -->
@@ -204,7 +213,7 @@ const setDot = (id, color, text, labelId) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Servo UI
 // ─────────────────────────────────────────────────────────────────────────────
-function updateServoUI(s1, s2, s3) {
+function updateServoUI(s1, s2, s3, strength) {
   const set = (bar, val, a) => {
     document.getElementById(bar).style.width = `${(a / 180) * 100}%`;
     document.getElementById(val).textContent  = `${a}°`;
@@ -212,14 +221,19 @@ function updateServoUI(s1, s2, s3) {
   set("bar-s1", "val-s1", s1);
   set("bar-s2", "val-s2", s2);
   set("bar-s3", "val-s3", s3);
+
+  document.getElementById("bar-str").style.width = `${strength * 100}%`;
+  document.getElementById("val-str").textContent  = strength.toFixed(2);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Packet encoding
-// Uses compact binary: 3 bytes [s1, s2, s3] — smallest possible datagram
+// Uses compact binary: 4 bytes [s1, s2, s3, strength] — smallest possible datagram
+// strength (0-1) is packed into a single byte (0-255)
 // ─────────────────────────────────────────────────────────────────────────────
-function encodeServos(s1, s2, s3) {
-  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF]);
+function encodePacket(s1, s2, s3, strength) {
+  const str8 = Math.round(clamp(strength, 0, 1) * 255);
+  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF, str8 & 0xFF]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,8 +251,12 @@ function quatToEulerDeg(q) {
   return [d(yaw), d(pitch), d(roll)];
 }
 
-const yawToServo   = deg => clamp(Math.round((deg + 180) / 360 * 180), 0, 180);
-const pitchToServo = deg => clamp(Math.round((deg +  90) / 180 * 180), 0, 180);
+// Gain > 1 means a smaller hand rotation now sweeps the full 0-180 range —
+// i.e. more sensitive than the original 1:1 (±180°/±90°) mapping.
+const YAW_GAIN   = 2.5;
+const PITCH_GAIN = 2.5;
+const yawToServo   = deg => clamp(Math.round(90 + deg * YAW_GAIN), 0, 180);
+const pitchToServo = deg => clamp(Math.round(90 + deg * PITCH_GAIN), 0, 180);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebTransport (QUIC datagrams ≈ UDP)
@@ -283,6 +301,7 @@ async function connectWT() {
     document.getElementById("btn-connect").disabled    = true;
     document.getElementById("btn-disconnect").disabled = false;
     document.getElementById("btn-enter").disabled      = false;
+    document.getElementById("btn-spin1").disabled      = false;
 
     // Datagram writer — fire-and-forget, no retransmit
     datagramWriter = transport.datagrams.writable.getWriter();
@@ -320,13 +339,23 @@ function onDisconnect() {
   document.getElementById("btn-connect").disabled    = false;
   document.getElementById("btn-disconnect").disabled = true;
   document.getElementById("btn-enter").disabled      = true;
+  document.getElementById("btn-spin1").disabled      = true;
 }
 
-async function sendDatagram(s1, s2, s3) {
+function spinStepper1() {
+  if (!datagramWriter) {
+    log("Not connected — click Connect first.");
+    return;
+  }
+  datagramWriter.write(new Uint8Array([0x01]));
+  log("Sent: spin stepper 1");
+}
+
+async function sendDatagram(s1, s2, s3, strength) {
   if (!datagramWriter) return;
   try {
     // Non-blocking write — drop if queue is full (true UDP-like behaviour)
-    await datagramWriter.write(encodeServos(s1, s2, s3));
+    await datagramWriter.write(encodePacket(s1, s2, s3, strength));
     sentCount++;
     sentLastSec++;
     document.getElementById("st-sent").textContent = sentCount;
@@ -338,6 +367,7 @@ async function sendDatagram(s1, s2, s3) {
 
 document.getElementById("btn-connect").addEventListener("click", connectWT);
 document.getElementById("btn-disconnect").addEventListener("click", disconnectWT);
+document.getElementById("btn-spin1").addEventListener("click", spinStepper1);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebXR session
@@ -346,7 +376,7 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 90, lastS2 = 90, lastS3 = 90;
+let lastS1 = 90, lastS2 = 90, lastS3 = 90, lastStrength = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-VR HUD — once inside the headset the page's status bar/servo bars/log
@@ -395,15 +425,17 @@ function initHud(gl) {
     throw new Error(`HUD program link error: ${gl.getProgramInfoLog(program)}`);
   }
 
-  // Head-locked quad ~0.6m wide, 1.2m in front of the eye. Coordinates are
-  // given directly in view space (no model/view matrix) so it always faces
-  // the camera and stays fixed in front of your face regardless of head pose.
+  // Head-locked quad tucked in the bottom-right corner of the view, 1.0m in
+  // front of the eye, instead of dead center — keeps the passthrough view
+  // clear while the readout stays glanceable. Coordinates are given directly
+  // in view space (no model/view matrix) so it always faces the camera and
+  // stays fixed in the same corner regardless of head pose.
   const verts = new Float32Array([
     // x,     y,     z,    u, v
-    -0.30, -0.15, -1.2,  0, 1,
-     0.30, -0.15, -1.2,  1, 1,
-    -0.30,  0.15, -1.2,  0, 0,
-     0.30,  0.15, -1.2,  1, 0,
+     0.20, -0.45, -1.0,  0, 1,
+     0.55, -0.45, -1.0,  1, 1,
+     0.20, -0.20, -1.0,  0, 0,
+     0.55, -0.20, -1.0,  1, 0,
   ]);
   const buffer = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
@@ -430,7 +462,7 @@ function initHud(gl) {
   };
 }
 
-function updateHudTexture(gl, s1, s2, s3) {
+function updateHudTexture(gl, s1, s2, s3, strength) {
   const { ctx, canvas, texture } = hud;
   const wtText = document.getElementById("wt-label").textContent;
   const xrText = document.getElementById("xr-label").textContent;
@@ -443,14 +475,15 @@ function updateHudTexture(gl, s1, s2, s3) {
 
   ctx.fillStyle = "#7df3ff";
   ctx.font = "bold 26px monospace";
-  ctx.fillText("QUEST → SERVO", 20, 40);
+  ctx.fillText("QUEST → STEPPER", 20, 40);
 
   ctx.font = "20px monospace";
   ctx.fillStyle = "#e0e0e0";
   ctx.fillText(wtText, 20, 80);
   ctx.fillText(xrText, 20, 108);
   ctx.fillText(`S1 ${s1}°  S2 ${s2}°  S3 ${s3}°`, 20, 150);
-  ctx.fillText(`Sent ${sentCount}   Dropped ${dropCount}`, 20, 180);
+  ctx.fillText(`STR ${strength.toFixed(2)}`, 20, 178);
+  ctx.fillText(`Sent ${sentCount}   Dropped ${dropCount}`, 20, 206);
 
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
@@ -565,18 +598,24 @@ function onXRFrame(time, frame) {
   const src  = Array.from(frame.session.inputSources).find(s => s.handedness === hand);
   const pose = src?.gripSpace ? frame.getPose(src.gripSpace, xrRefSpace) : null;
 
+  // Strength is always read from the right controller's trigger (button 0),
+  // independent of which hand drives the angles via "Controller" above.
+  const rightSrc = Array.from(frame.session.inputSources).find(s => s.handedness === "right");
+  const trigger   = rightSrc?.gamepad?.buttons?.[0];
+  lastStrength    = trigger ? clamp(trigger.value, 0, 1) : 0;
+
   if (pose) {
     const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
     lastS1 = yawToServo(yaw);
     lastS2 = pitchToServo(pitch);
     lastS3 = yawToServo(roll);
+  }
 
-    updateServoUI(lastS1, lastS2, lastS3);
+  updateServoUI(lastS1, lastS2, lastS3, lastStrength);
 
-    if (time - lastSendTime >= minGap) {
-      sendDatagram(lastS1, lastS2, lastS3);   // fire-and-forget datagram
-      lastSendTime = time;
-    }
+  if (time - lastSendTime >= minGap) {
+    sendDatagram(lastS1, lastS2, lastS3, lastStrength);   // fire-and-forget datagram
+    lastSendTime = time;
   }
 
   // Render the HUD every frame regardless of controller tracking, so you can
@@ -586,7 +625,7 @@ function onXRFrame(time, frame) {
   const viewerPose = frame.getViewerPose(xrRefSpace);
   if (viewerPose && hud) {
     if (time - hud.lastDraw > 150) {
-      updateHudTexture(xrGL, lastS1, lastS2, lastS3);
+      updateHudTexture(xrGL, lastS1, lastS2, lastS3, lastStrength);
       hud.lastDraw = time;
     }
     for (const view of viewerPose.views) {
