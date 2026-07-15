@@ -345,6 +345,7 @@ document.getElementById("btn-disconnect").addEventListener("click", disconnectWT
 let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
+let xrGL = null;
 
 const btnEnter = document.getElementById("btn-enter");
 
@@ -357,6 +358,16 @@ btnEnter.addEventListener("click", async () => {
     xrSession  = await navigator.xr.requestSession("immersive-vr", {
       optionalFeatures: ["local-floor"],
     });
+
+    // A WebXR session must have a render layer or the headset compositor
+    // has nothing to display and hangs on the "entering VR" transition.
+    const canvas = document.createElement("canvas");
+    xrGL = canvas.getContext("webgl", { xrCompatible: true });
+    await xrGL.makeXRCompatible();
+    xrSession.updateRenderState({
+      baseLayer: new XRWebGLLayer(xrSession, xrGL),
+    });
+
     xrRefSpace = await xrSession.requestReferenceSpace("local-floor").catch(
       () => xrSession.requestReferenceSpace("local")
     );
@@ -368,7 +379,7 @@ btnEnter.addEventListener("click", async () => {
     xrSession.addEventListener("end", () => {
       setDot("xr-dot", "red", "XR: ended", "xr-label");
       btnEnter.disabled = false;
-      xrSession = null; xrRefSpace = null;
+      xrSession = null; xrRefSpace = null; xrGL = null;
       log("XR session ended.");
     });
 
@@ -382,6 +393,13 @@ btnEnter.addEventListener("click", async () => {
 function onXRFrame(time, frame) {
   if (!xrSession) return;
   xrSession.requestAnimationFrame(onXRFrame);
+
+  // Submit an (empty, cleared) frame — required for the compositor to
+  // treat the session as actively rendering rather than stalled.
+  const layer = frame.session.renderState.baseLayer;
+  xrGL.bindFramebuffer(xrGL.FRAMEBUFFER, layer.framebuffer);
+  xrGL.clearColor(0.05, 0.05, 0.08, 1.0);
+  xrGL.clear(xrGL.COLOR_BUFFER_BIT | xrGL.DEPTH_BUFFER_BIT);
 
   const hand   = document.getElementById("cfg-hand").value.trim() || "right";
   const hz     = Math.max(1, Math.min(120, parseInt(document.getElementById("cfg-hz").value) || 60));
