@@ -355,15 +355,20 @@ btnEnter.addEventListener("click", async () => {
     return;
   }
   try {
+    // Prep the WebGL context BEFORE requesting the session so it's already
+    // XR-compatible the instant the session exists — the headset's "entering
+    // VR" transition starts as soon as requestSession() resolves, and every
+    // ms spent on setup after that is a ms with no frames being submitted.
+    const canvas = document.createElement("canvas");
+    xrGL = canvas.getContext("webgl", { xrCompatible: true });
+    await xrGL.makeXRCompatible();
+
     xrSession  = await navigator.xr.requestSession("immersive-vr", {
       optionalFeatures: ["local-floor"],
     });
 
     // A WebXR session must have a render layer or the headset compositor
     // has nothing to display and hangs on the "entering VR" transition.
-    const canvas = document.createElement("canvas");
-    xrGL = canvas.getContext("webgl", { xrCompatible: true });
-    await xrGL.makeXRCompatible();
     xrSession.updateRenderState({
       baseLayer: new XRWebGLLayer(xrSession, xrGL),
     });
@@ -387,6 +392,13 @@ btnEnter.addEventListener("click", async () => {
   } catch (err) {
     log(`XR error: ${err.message}`);
     setDot("xr-dot", "red", "XR: failed", "xr-label");
+    // If requestSession() already resolved, the headset has started its VR
+    // transition — without ending the session here it hangs on that loading
+    // screen forever, hiding the very error we just logged.
+    if (xrSession) {
+      xrSession.end().catch(() => {});
+      xrSession = null;
+    }
   }
 });
 
