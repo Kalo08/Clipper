@@ -1,17 +1,27 @@
 """
 WebTransport (QUIC) → Servo Bridge
 Receives compact binary datagrams from the Meta Quest WebXR page
-and drives GPIO servos on a Raspberry Pi 3.
+and drives servos via a PCA9685 I2C PWM driver on a Raspberry Pi 3.
 
 Packet format (matches webxr_controller.html):
     1 byte  → command byte (0x01 = spin stepper 1 one revolution)
     3 bytes → servo angles [S1, S2, S3], each 0-180
-        byte 0 → S1 angle  (0–180)  pan  / yaw
-        byte 1 → S2 angle  (0–180)  tilt / pitch
-        byte 2 → S3 angle  (0–180)  roll
+        byte 0 → S1 angle  (0–180)  pan  / yaw    → PCA9685 channel 1
+        byte 1 → S2 angle  (0–180)  tilt / pitch  → PCA9685 channel 2
+        byte 2 → S3 angle  (0–180)  roll           → PCA9685 channel 3
+
+Wiring (PCA9685 → Pi 3):
+    VCC  → 3.3 V (pin 1)
+    GND  → GND   (pin 6)
+    SDA  → GPIO 2 / SDA1 (pin 3)
+    SCL  → GPIO 3 / SCL1 (pin 5)
+    V+   → 5–6 V external supply for servos
 
 Dependencies (install on the Pi):
-    pip install aioquic RPi.GPIO
+    pip install aioquic adafruit-circuitpython-servokit RPi.GPIO
+
+Enable I2C on the Pi first:
+    sudo raspi-config → Interface Options → I2C → Enable
 
 Generate your TLS cert first:
     python setup_cert.py
@@ -31,15 +41,24 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── Optional GPIO import ──────────────────────────────────────────────────────
+# ── PCA9685 / ServoKit import ─────────────────────────────────────────────────
 SIMULATE = False
+kit = None
+try:
+    from adafruit_servokit import ServoKit
+    kit = ServoKit(channels=16)
+except Exception as e:
+    SIMULATE = True
+    print(f"[bridge] PCA9685/ServoKit unavailable ({e}) — SIMULATE mode (no servo output).")
+
+# ── Stepper GPIO import ───────────────────────────────────────────────────────
 try:
     import RPi.GPIO as GPIO
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
+    _GPIO_OK = not SIMULATE
 except (ImportError, RuntimeError):
-    SIMULATE = True
-    print("[bridge] RPi.GPIO unavailable — running in SIMULATE mode (no GPIO output).")
+    _GPIO_OK = False
 
 # ── aioquic imports ───────────────────────────────────────────────────────────
 try:
@@ -65,11 +84,8 @@ CERT_FILE = Path("cert.pem")
 KEY_FILE  = Path("key.pem")
 WT_PATH   = "/servo"        # Must match the URL in webxr_controller.html
 
-# BCM GPIO pin numbers
-SERVO_PINS = {"s1": 17, "s2": 27, "s3": 22}
-PWM_FREQ   = 50     # Hz
-DUTY_MIN   = 2.5    # % → 0°
-DUTY_MAX   = 12.5   # % → 180°
+# PCA9685 channel numbers for each servo (0-indexed, matches board labels)
+SERVO_CHANNELS = {"s1": 1, "s2": 2, "s3": 3}
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
@@ -87,7 +103,6 @@ log = logging.getLogger("wt-bridge")
 logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
 # ── Servo state ───────────────────────────────────────────────────────────────
-pwm_channels: dict[str, object] = {}
 current_angles = {"s1": 90, "s2": 90, "s3": 90}
 
 # Stats
@@ -95,34 +110,32 @@ pkt_count  = 0
 last_stats = time.monotonic()
 
 
-def angle_to_duty(angle: int) -> float:
-    return DUTY_MIN + (max(0, min(180, angle)) / 180.0) * (DUTY_MAX - DUTY_MIN)
-
-
 def init_servos():
     if SIMULATE:
-        log.info("SIMULATE mode — no GPIO initialised.")
+        log.info("SIMULATE mode — PCA9685 not initialised.")
         return
-    for key, pin in SERVO_PINS.items():
-        GPIO.setup(pin, GPIO.OUT)
-        pwm = GPIO.PWM(pin, PWM_FREQ)
-        pwm.start(angle_to_duty(90))
-        pwm_channels[key] = pwm
-        log.info(f"  GPIO {pin} → {key} initialised (90°)")
+    for key, ch in SERVO_CHANNELS.items():
+        kit.servo[ch].angle = 90   # centre all servos on startup
+        log.info(f"  PCA9685 ch{ch} → {key.upper()} initialised (90°)")
 
 
 def move_servo(key: str, angle: int):
     current_angles[key] = angle
-    if not SIMULATE and key in pwm_channels:
-        pwm_channels[key].ChangeDutyCycle(angle_to_duty(angle))
+    if not SIMULATE:
+        kit.servo[SERVO_CHANNELS[key]].angle = max(0, min(180, angle))
 
 
 def cleanup_servos():
     if SIMULATE:
         return
-    for pwm in pwm_channels.values():
-        pwm.stop()
-    GPIO.cleanup()
+    # Centre all servos on exit so they don't hold tension
+    for key, ch in SERVO_CHANNELS.items():
+        try:
+            kit.servo[ch].angle = 90
+        except Exception:
+            pass
+    if _GPIO_OK:
+        GPIO.cleanup()
 
 
 def bar(a: int, w: int = 16) -> str:
@@ -269,9 +282,9 @@ async def main():
     print(f"  WebTransport Servo Bridge  (QUIC / UDP-like datagrams)")
     print(f"  Listening on  https://{HOST}:{PORT}{WT_PATH}")
     print(f"  Simulate mode: {SIMULATE}")
-    print(f"\n  Servo GPIO map:")
-    for k, pin in SERVO_PINS.items():
-        print(f"    {k.upper()} → GPIO {pin} (BCM)")
+    print(f"\n  PCA9685 servo channel map:")
+    for k, ch in SERVO_CHANNELS.items():
+        print(f"    {k.upper()} → PCA9685 channel {ch}")
     print(f"\n  Stepper 1 (A4988) GPIO map:")
     print(f"    STEP1 → GPIO {STEP1_PIN} (BCM)")
     print(f"    DIR1  → GPIO {DIR1_PIN} (BCM)")
