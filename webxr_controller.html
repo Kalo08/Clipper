@@ -168,7 +168,7 @@
   <!-- ── Buttons ────────────────────────────────────── -->
   <div class="btn-row">
     <button id="btn-connect" class="primary">Connect</button>
-    <button id="btn-enter"   class="primary" disabled>Enter VR</button>
+    <button id="btn-enter"   class="primary" disabled>Enter AR</button>
     <button id="btn-disconnect" disabled>Disconnect</button>
   </div>
 
@@ -490,13 +490,23 @@ btnEnter.addEventListener("click", async () => {
     // VR" transition starts as soon as requestSession() resolves, and every
     // ms spent on setup after that is a ms with no frames being submitted.
     const canvas = document.createElement("canvas");
-    xrGL = canvas.getContext("webgl", { xrCompatible: true });
+    xrGL = canvas.getContext("webgl", { xrCompatible: true, alpha: true });
     await xrGL.makeXRCompatible();
     initHud(xrGL);
 
-    xrSession  = await navigator.xr.requestSession("immersive-vr", {
-      optionalFeatures: ["local-floor"],
-    });
+    // "immersive-ar" is what gives passthrough (see-through camera) on Quest —
+    // "immersive-vr" is always opaque. Fall back to VR if AR isn't supported.
+    try {
+      xrSession = await navigator.xr.requestSession("immersive-ar", {
+        optionalFeatures: ["local-floor"],
+      });
+      log("Passthrough AR session requested.");
+    } catch (arErr) {
+      log("Passthrough AR unavailable, falling back to opaque VR.");
+      xrSession = await navigator.xr.requestSession("immersive-vr", {
+        optionalFeatures: ["local-floor"],
+      });
+    }
 
     // A WebXR session must have a render layer or the headset compositor
     // has nothing to display and hangs on the "entering VR" transition.
@@ -541,7 +551,11 @@ function onXRFrame(time, frame) {
   // treat the session as actively rendering rather than stalled.
   const layer = frame.session.renderState.baseLayer;
   xrGL.bindFramebuffer(xrGL.FRAMEBUFFER, layer.framebuffer);
-  xrGL.clearColor(0.05, 0.05, 0.08, 1.0);
+  // Fully transparent clear — in "immersive-ar" mode this lets the real-world
+  // passthrough camera show through everywhere except the HUD panel itself.
+  // (In the opaque "immersive-vr" fallback, alpha is ignored and this just
+  // renders black, same as before.)
+  xrGL.clearColor(0.0, 0.0, 0.0, 0.0);
   xrGL.clear(xrGL.COLOR_BUFFER_BIT | xrGL.DEPTH_BUFFER_BIT);
 
   const hand   = document.getElementById("cfg-hand").value.trim() || "right";
@@ -598,8 +612,11 @@ window.addEventListener("load", async () => {
     log("WebXR not available on this browser.");
     return;
   }
-  const ok = await navigator.xr.isSessionSupported("immersive-vr");
-  log(ok ? "Immersive VR supported — ready." : "Immersive VR not supported.");
+  const arOk = await navigator.xr.isSessionSupported("immersive-ar");
+  const vrOk = await navigator.xr.isSessionSupported("immersive-vr");
+  log(arOk ? "Passthrough AR supported — ready." :
+      vrOk ? "Immersive VR supported (no passthrough on this device)." :
+      "No immersive XR mode supported.");
 });
 </script>
 </body>
