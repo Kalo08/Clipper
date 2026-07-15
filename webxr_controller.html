@@ -346,6 +346,136 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
+let lastS1 = 90, lastS2 = 90, lastS3 = 90;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// In-VR HUD — once inside the headset the page's status bar/servo bars/log
+// are invisible, so this draws the same info onto a head-locked quad in front
+// of the eye. Otherwise there's no way to tell it's working besides a blank
+// clear color.
+// ─────────────────────────────────────────────────────────────────────────────
+let hud = null;
+
+function compileShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(sh);
+    gl.deleteShader(sh);
+    throw new Error(`Shader compile error: ${info}`);
+  }
+  return sh;
+}
+
+function initHud(gl) {
+  const vsSrc = `
+    attribute vec3 aPos;
+    attribute vec2 aUV;
+    uniform mat4 uProj;
+    varying vec2 vUV;
+    void main() {
+      gl_Position = uProj * vec4(aPos, 1.0);
+      vUV = aUV;
+    }
+  `;
+  const fsSrc = `
+    precision mediump float;
+    uniform sampler2D uTex;
+    varying vec2 vUV;
+    void main() {
+      gl_FragColor = texture2D(uTex, vUV);
+    }
+  `;
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(`HUD program link error: ${gl.getProgramInfoLog(program)}`);
+  }
+
+  // Head-locked quad ~0.6m wide, 1.2m in front of the eye. Coordinates are
+  // given directly in view space (no model/view matrix) so it always faces
+  // the camera and stays fixed in front of your face regardless of head pose.
+  const verts = new Float32Array([
+    // x,     y,     z,    u, v
+    -0.30, -0.15, -1.2,  0, 1,
+     0.30, -0.15, -1.2,  1, 1,
+    -0.30,  0.15, -1.2,  0, 0,
+     0.30,  0.15, -1.2,  1, 0,
+  ]);
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = 512; canvas.height = 256;
+  const ctx = canvas.getContext("2d");
+
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+  hud = {
+    program, buffer, canvas, ctx, texture,
+    aPos:  gl.getAttribLocation(program, "aPos"),
+    aUV:   gl.getAttribLocation(program, "aUV"),
+    uProj: gl.getUniformLocation(program, "uProj"),
+    uTex:  gl.getUniformLocation(program, "uTex"),
+    lastDraw: 0,
+  };
+}
+
+function updateHudTexture(gl, s1, s2, s3) {
+  const { ctx, canvas, texture } = hud;
+  const wtText = document.getElementById("wt-label").textContent;
+  const xrText = document.getElementById("xr-label").textContent;
+
+  ctx.fillStyle = "#0d0d14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = "#7df3ff";
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
+
+  ctx.fillStyle = "#7df3ff";
+  ctx.font = "bold 26px monospace";
+  ctx.fillText("QUEST → SERVO", 20, 40);
+
+  ctx.font = "20px monospace";
+  ctx.fillStyle = "#e0e0e0";
+  ctx.fillText(wtText, 20, 80);
+  ctx.fillText(xrText, 20, 108);
+  ctx.fillText(`S1 ${s1}°  S2 ${s2}°  S3 ${s3}°`, 20, 150);
+  ctx.fillText(`Sent ${sentCount}   Dropped ${dropCount}`, 20, 180);
+
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+}
+
+function drawHud(gl, projectionMatrix) {
+  gl.useProgram(hud.program);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, hud.buffer);
+  gl.enableVertexAttribArray(hud.aPos);
+  gl.vertexAttribPointer(hud.aPos, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(hud.aUV);
+  gl.vertexAttribPointer(hud.aUV, 2, gl.FLOAT, false, 20, 12);
+
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, hud.texture);
+  gl.uniform1i(hud.uTex, 0);
+  gl.uniformMatrix4fv(hud.uProj, false, projectionMatrix);
+
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
 
 const btnEnter = document.getElementById("btn-enter");
 
@@ -362,6 +492,7 @@ btnEnter.addEventListener("click", async () => {
     const canvas = document.createElement("canvas");
     xrGL = canvas.getContext("webgl", { xrCompatible: true });
     await xrGL.makeXRCompatible();
+    initHud(xrGL);
 
     xrSession  = await navigator.xr.requestSession("immersive-vr", {
       optionalFeatures: ["local-floor"],
@@ -384,7 +515,7 @@ btnEnter.addEventListener("click", async () => {
     xrSession.addEventListener("end", () => {
       setDot("xr-dot", "red", "XR: ended", "xr-label");
       btnEnter.disabled = false;
-      xrSession = null; xrRefSpace = null; xrGL = null;
+      xrSession = null; xrRefSpace = null; xrGL = null; hud = null;
       log("XR session ended.");
     });
 
@@ -417,22 +548,38 @@ function onXRFrame(time, frame) {
   const hz     = Math.max(1, Math.min(120, parseInt(document.getElementById("cfg-hz").value) || 60));
   const minGap = 1000 / hz;
 
-  const src = Array.from(frame.session.inputSources).find(s => s.handedness === hand);
-  if (!src?.gripSpace) return;
+  const src  = Array.from(frame.session.inputSources).find(s => s.handedness === hand);
+  const pose = src?.gripSpace ? frame.getPose(src.gripSpace, xrRefSpace) : null;
 
-  const pose = frame.getPose(src.gripSpace, xrRefSpace);
-  if (!pose) return;
+  if (pose) {
+    const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
+    lastS1 = yawToServo(yaw);
+    lastS2 = pitchToServo(pitch);
+    lastS3 = yawToServo(roll);
 
-  const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
-  const s1 = yawToServo(yaw);
-  const s2 = pitchToServo(pitch);
-  const s3 = yawToServo(roll);
+    updateServoUI(lastS1, lastS2, lastS3);
 
-  updateServoUI(s1, s2, s3);
+    if (time - lastSendTime >= minGap) {
+      sendDatagram(lastS1, lastS2, lastS3);   // fire-and-forget datagram
+      lastSendTime = time;
+    }
+  }
 
-  if (time - lastSendTime >= minGap) {
-    sendDatagram(s1, s2, s3);   // fire-and-forget datagram
-    lastSendTime = time;
+  // Render the HUD every frame regardless of controller tracking, so you can
+  // always see connection/tracking status from inside the headset — a
+  // missing controller pose should show up as "stuck at last value" on the
+  // HUD, not as a dark, silent screen.
+  const viewerPose = frame.getViewerPose(xrRefSpace);
+  if (viewerPose && hud) {
+    if (time - hud.lastDraw > 150) {
+      updateHudTexture(xrGL, lastS1, lastS2, lastS3);
+      hud.lastDraw = time;
+    }
+    for (const view of viewerPose.views) {
+      const vp = layer.getViewport(view);
+      xrGL.viewport(vp.x, vp.y, vp.width, vp.height);
+      drawHud(xrGL, view.projectionMatrix);
+    }
   }
 }
 
