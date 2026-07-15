@@ -247,16 +247,18 @@ async def main():
         except NotImplementedError:
             pass
 
-    async with await serve(
+    server = await serve(
         host=HOST,
         port=PORT,
         configuration=config,
         create_protocol=ServoHandler,
-    ):
-        try:
-            await stop
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            pass
+    )
+    try:
+        await stop
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
+    finally:
+        server.close()
 
     print()
     log.info(f"Shutting down.  Total packets received: {pkt_count}")
