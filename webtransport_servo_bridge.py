@@ -16,11 +16,11 @@ Wiring (servo → Pi 4):
     GND    → common ground with the Pi
 
 Dependencies (install on the Pi):
-    pip install aioquic pigpio RPi.GPIO
+    pip install aioquic gpiozero lgpio RPi.GPIO
 
-Start the pigpio daemon first (needed for jitter-free servo PWM):
-    sudo apt install -y pigpio python3-pigpio
-    sudo systemctl enable pigpiod --now
+gpiozero + lgpio drive the servo PWM directly (no daemon needed) via the
+modern GPIO chardev interface — works on current Raspberry Pi OS releases
+where the unmaintained `pigpio` package is no longer available.
 
 Generate your TLS cert first:
     python setup_cert.py
