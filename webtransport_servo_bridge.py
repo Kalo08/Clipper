@@ -105,10 +105,11 @@ SERVO_FOLLOWERS = {"s2": ("s2b", lambda a: 180 - a)}
 SERVO_FOLLOWER_DELAY_S = 0.0
 
 # Constant trim added to s2b's mirrored angle, correcting a horn seated a few
-# splines off. In-sync on the outbound sweep but ~doubly-delayed on the return
-# with 30ms delay ≈ 7° of offset (240°/s × 0.03s). If the pair now fights
-# slightly at rest or the asymmetry gets WORSE, flip the sign to +7.0.
-SERVO_FOLLOWER_TRIM_DEG = -7.0
+# degrees off true mirror. Tune this ONLY once behavior is consistent
+# (stable power, no random twitching) — calibrating against noise is
+# meaningless. Symptom of needing trim: lead/lag that flips with sweep
+# direction, the same way every sweep.
+SERVO_FOLLOWER_TRIM_DEG = 0.0
 
 # Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
 SERVO_INIT = {"s2b": 180}
@@ -195,7 +196,10 @@ def move_servo(key: str, angle: int):
 
 def _slew_loop():
     from collections import deque
-    TICK = 0.01                              # 100 Hz
+    # 50 Hz — matches the servo pulse rate. Updating pulse widths faster
+    # than the servos consume them (e.g. 100 Hz) risks mid-pulse glitches
+    # with software-timed PWM, which shows up as random twitching.
+    TICK = 0.02
     step = SERVO_SLEW_DEG_PER_S * TICK       # max degrees per tick
     # -1: the loop ordering (target read → step → history append) already
     # contributes one tick of inherent lag

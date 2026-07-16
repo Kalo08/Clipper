@@ -31,7 +31,7 @@ SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4, "s2b": 18}
 
 # Angle each servo holds in the zeroed pose (s2b mirrors s2: 180 - 0, plus
 # the same trim as SERVO_FOLLOWER_TRIM_DEG in the bridge — keep them in sync)
-ZERO_ANGLES = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 173}
+ZERO_ANGLES = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
 
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500
