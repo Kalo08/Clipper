@@ -112,7 +112,10 @@ SERVO_FOLLOWER_DELAY_S = 0.0
 SERVO_FOLLOWER_TRIM_DEG = 0.0
 
 # Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
-SERVO_INIT = {"s2b": 180}
+# s1 starts centred (90 = "facing forward" once calibrated) rather than at
+# its 0 default — with the s1 mirror below, initial_angle=0 would otherwise
+# swing the base to its opposite physical extreme for no reason at cold start.
+SERVO_INIT = {"s2b": 180, "s1": 90}
 
 # Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
 SERVO_MIN_US = 500
@@ -132,16 +135,23 @@ SERVO_LIMITS = {
     "s4":  (5, 175),
 }
 
-# NOTE: a global "reverse s2's direction" mirror (angle -> 180 - angle) was
-# tried here and reverted — logical angle 0 is confirmed to be the arm's
-# straight-up rest pose (via zero_servos.py), and mirroring the whole 0-180
-# range necessarily moves that reference to the opposite physical extreme
-# (logical 0 -> physical 180), which is NOT "up". A true full-range direction
-# reversal is mathematically incompatible with keeping 0 fixed at "up" — any
-# monotonically-decreasing map from [0,180] onto [0,180] forces f(0)=180.
-# If S2 still moves the "wrong" way, the real fix has to be mechanical
-# (re-seat the horn a spline or two) or a narrower, non-mirroring correction —
-# not a global software flip.
+# NOTE: an s2 direction-reversal mirror (angle -> 180 - angle) was tried here
+# and reverted — logical angle 0 is confirmed to be the arm's straight-up
+# rest pose, and mirroring the whole 0-180 range moves that reference to the
+# opposite physical extreme (0 -> 180), which is NOT "up". A full-range
+# reversal is only safe when the joint's reference position sits at the
+# CENTRE (90) rather than an endpoint — see s1 below, where that holds.
+#
+# s1 (base) swings the wrong horizontal direction — target-right commands
+# spin it left. s1's reference ("facing forward" at calibration) is at the
+# CENTRE of its range (90°), not an endpoint, so mirroring is safe here:
+# 180 - 90 = 90, the centre — and therefore the calibration reference —
+# stays fixed while the direction of swing flips.
+SERVO_INVERT = {"s1"}
+
+
+def _phys_angle(key: str, angle: float) -> float:
+    return 180 - angle if key in SERVO_INVERT else angle
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
@@ -169,7 +179,10 @@ logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 SERVO_SLEW_DEG_PER_S = 20
 
 # ── Servo state ───────────────────────────────────────────────────────────────
-current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
+# Bookkeeping must start at the SAME logical angle each servo is actually
+# initialised to (SERVO_INIT), or the slew loop's first move jump-cuts from
+# a stale "0" instead of continuing smoothly from where the servo really is.
+current_angles = {key: SERVO_INIT.get(key, 0) for key in SERVO_GPIO}
 target_angles  = dict(current_angles)
 _slew_stop = None   # threading.Event, created when the slew loop starts
 
@@ -189,7 +202,7 @@ def init_servos():
         init_angle = SERVO_INIT.get(key, 0)
         servos[key] = _AngularServo(
             gpio,
-            initial_angle=init_angle,
+            initial_angle=_phys_angle(key, init_angle),
             min_angle=0,
             max_angle=180,
             min_pulse_width=SERVO_MIN_US / 1_000_000,
@@ -241,7 +254,7 @@ def _slew_loop():
                     new = cur + step if tgt > cur else cur - step
                 current_angles[key] = new
                 if not SIMULATE:
-                    servos[key].angle = new
+                    servos[key].angle = _phys_angle(key, new)
 
         for master in history:
             history[master].append(current_angles[master])
@@ -266,7 +279,7 @@ def cleanup_servos():
         for key, servo in servos.items():
             try:
                 lo, hi = SERVO_LIMITS[key]
-                servo.angle = (lo + hi) / 2
+                servo.angle = _phys_angle(key, (lo + hi) / 2)
                 time.sleep(0.3)
                 servo.close()
             except Exception:
