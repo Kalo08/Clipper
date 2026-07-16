@@ -27,8 +27,8 @@ CANDIDATES = [
     (27, 13),   # bridge S1 — base rotation
     (17, 11),   # bridge S2 — joint on base
     (22, 15),   # bridge S3
+    (4,   7),   # bridge S4 — trigger-driven
     (18, 12),   # neighbour of pin 11 (same row)
-    (4,  7),    # above pin 11
     (10, 19),   # below pin 15's area
     (9,  21),
     (11, 23),
@@ -65,4 +65,4 @@ for gpio, pin in CANDIDATES:
     print(f"  Done. If a servo just wiggled, its signal wire is on GPIO{gpio} (pin {pin}).")
 
 print("\nAll candidates tested.")
-print("Match what you saw against the bridge map: S1=GPIO27  S2=GPIO17  S3=GPIO22")
+print("Match what you saw against the bridge map: S1=GPIO27  S2=GPIO17  S3=GPIO22  S4=GPIO4")

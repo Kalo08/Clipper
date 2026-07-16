@@ -1,5 +1,5 @@
 """
-Zero servos — drives S1/S2/S3 to 0 degrees and holds, then releases the pins.
+Zero servos — drives S1/S2/S3/S4 to 0 degrees and holds, then releases the pins.
 
 Run this with the bridge STOPPED (Ctrl+C webtransport_servo_bridge.py first),
 otherwise the GPIO pins are already claimed and this script will fail to
@@ -22,8 +22,8 @@ except Exception as e:
     raise SystemExit(1)
 
 # Must match SERVO_GPIO in webtransport_servo_bridge.py
-# s1 -> physical pin 13, s2 -> physical pin 11, s3 -> physical pin 15
-SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22}
+# s1 -> physical pin 13, s2 -> physical pin 11, s3 -> physical pin 15, s4 -> physical pin 7
+SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4}
 
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500

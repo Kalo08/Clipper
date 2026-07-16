@@ -9,9 +9,11 @@ Packet format (matches webxr_controller.html):
         byte 0 → S1 angle  (0–180)  base rotation (pan / yaw)        → GPIO27 (physical pin 13)
         byte 1 → S2 angle  (0–180)  joint on base (tilt / pitch)     → GPIO17 (physical pin 11)
         byte 2 → S3 angle  (0–180)  roll                             → GPIO22 (physical pin 15)
+        byte 3 → S4 angle  (0–180)  driven by analog trigger, 90=up/0=down → GPIO4 (physical pin 7)
+        byte 4 → trigger strength (0-255), informational only
 
 Wiring (servo → Pi 4):
-    Signal → GPIO27 / GPIO17 / GPIO22 (physical pins 13 / 11 / 15)
+    Signal → GPIO27 / GPIO17 / GPIO22 / GPIO4 (physical pins 13 / 11 / 15 / 7)
     V+     → 5–6 V external supply for servos (NOT the Pi's 5V pin)
     GND    → common ground with the Pi
 
@@ -87,7 +89,7 @@ KEY_FILE  = Path("key.pem")
 WT_PATH   = "/servo"        # Must match the URL in webxr_controller.html
 
 # GPIO pin (BCM numbering) for each servo's PWM signal wire
-SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22}
+SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4}
 
 # Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
 SERVO_MIN_US = 500
@@ -109,7 +111,7 @@ log = logging.getLogger("wt-bridge")
 logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
 # ── Servo state ───────────────────────────────────────────────────────────────
-current_angles = {"s1": 90, "s2": 90, "s3": 90}
+current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0}
 
 # Stats
 pkt_count  = 0
@@ -126,13 +128,13 @@ def init_servos():
     for key, gpio in SERVO_GPIO.items():
         servos[key] = _AngularServo(
             gpio,
-            initial_angle=90,
+            initial_angle=0,
             min_angle=0,
             max_angle=180,
             min_pulse_width=SERVO_MIN_US / 1_000_000,
             max_pulse_width=SERVO_MAX_US / 1_000_000,
         )
-        log.info(f"  GPIO{gpio} → {key.upper()} initialised (90°)")
+        log.info(f"  GPIO{gpio} → {key.upper()} initialised (0°)")
 
 
 def move_servo(key: str, angle: int):
@@ -250,17 +252,17 @@ def handle_packet(data: bytes):
             asyncio.get_event_loop().run_in_executor(None, sweep_servo, key)
         return
 
-    if len(data) < 3:
+    if len(data) < 4:
         return
 
-    s1, s2, s3 = data[0], data[1], data[2]
+    s1, s2, s3, s4 = data[0], data[1], data[2], data[3]
 
     # Validate range — ignore garbage
-    if not (0 <= s1 <= 180 and 0 <= s2 <= 180 and 0 <= s3 <= 180):
+    if not (0 <= s1 <= 180 and 0 <= s2 <= 180 and 0 <= s3 <= 180 and 0 <= s4 <= 180):
         return
 
     # Skip servos mid-sweep so streamed angles don't fight the sweep loop
-    for key, val in (("s1", s1), ("s2", s2), ("s3", s3)):
+    for key, val in (("s1", s1), ("s2", s2), ("s3", s3), ("s4", s4)):
         if key not in _busy:
             move_servo(key, val)
     pkt_count += 1
@@ -270,7 +272,7 @@ def handle_packet(data: bytes):
     if pkt_count % 30 == 0:
         ts = datetime.now().strftime("%H:%M:%S")
         print(
-            f"\r{ts}  S1{bar(s1)}  S2{bar(s2)}  S3{bar(s3)}  "
+            f"\r{ts}  S1{bar(s1)}  S2{bar(s2)}  S3{bar(s3)}  S4{bar(s4)}  "
             f"[{pkt_count} pkts]   ",
             end="", flush=True,
         )

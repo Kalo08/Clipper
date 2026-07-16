@@ -126,11 +126,11 @@
   <!-- ── Config ─────────────────────────────────────── -->
   <div class="cfg-grid">
     <label>Pi IP</label>
-    <input id="cfg-ip"   value="172.20.10.7" placeholder="Raspberry Pi LAN IP" />
+    <input id="cfg-ip"   value="172.20.10.9" placeholder="Raspberry Pi LAN IP" />
     <label>Port</label>
     <input id="cfg-port" value="4433"          placeholder="4433" />
     <label>Cert hash (base64)</label>
-    <input id="cfg-hash" value="NtudMkkERYKhVJcwg428GRSGNX+10IlK9QGzoPLfesE="
+    <input id="cfg-hash" value="v6P5G/dmmsx0sz27rdK+NAYFt3i6T4KXutCO2j2IQOQ="
            placeholder="Paste from: python setup_cert.py" />
     <label>Send rate (Hz)</label>
     <input id="cfg-hz"   value="60"            placeholder="60" />
@@ -162,6 +162,11 @@
       <span class="servo-label">S3</span>
       <div class="servo-track"><div class="servo-fill" id="bar-s3"></div></div>
       <span class="servo-val" id="val-s3">90°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S4</span>
+      <div class="servo-track"><div class="servo-fill" id="bar-s4"></div></div>
+      <span class="servo-val" id="val-s4">90°</span>
     </div>
     <div class="servo-row">
       <span class="servo-label">STR</span>
@@ -215,7 +220,7 @@ const setDot = (id, color, text, labelId) => {
 // ─────────────────────────────────────────────────────────────────────────────
 // Servo UI
 // ─────────────────────────────────────────────────────────────────────────────
-function updateServoUI(s1, s2, s3, strength) {
+function updateServoUI(s1, s2, s3, s4, strength) {
   const set = (bar, val, a) => {
     document.getElementById(bar).style.width = `${(a / 180) * 100}%`;
     document.getElementById(val).textContent  = `${a}°`;
@@ -223,6 +228,7 @@ function updateServoUI(s1, s2, s3, strength) {
   set("bar-s1", "val-s1", s1);
   set("bar-s2", "val-s2", s2);
   set("bar-s3", "val-s3", s3);
+  set("bar-s4", "val-s4", s4);
 
   document.getElementById("bar-str").style.width = `${strength * 100}%`;
   document.getElementById("val-str").textContent  = strength.toFixed(2);
@@ -230,18 +236,22 @@ function updateServoUI(s1, s2, s3, strength) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Packet encoding
-// Uses compact binary: 4 bytes [s1, s2, s3, strength] — smallest possible datagram
+// Uses compact binary: 5 bytes [s1, s2, s3, s4, strength] — smallest possible datagram
 // strength (0-1) is packed into a single byte (0-255)
 // ─────────────────────────────────────────────────────────────────────────────
-function encodePacket(s1, s2, s3, strength) {
+function encodePacket(s1, s2, s3, s4, strength) {
   const str8 = Math.round(clamp(strength, 0, 1) * 255);
-  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF, str8 & 0xFF]);
+  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF, s4 & 0xFF, str8 & 0xFF]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Math
 // ─────────────────────────────────────────────────────────────────────────────
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// Analog trigger (0=released, 1=fully pulled) drives S4 down from its 90°
+// rest position — fully pulled sends it to 0°.
+const triggerToServo = strength => clamp(Math.round(90 - clamp(strength, 0, 1) * 90), 0, 180);
 
 function quatToEulerDeg(q) {
   const { x, y, z, w } = q;
@@ -363,11 +373,11 @@ function spinServo(channel) {
   log(`Sent: spin servo ${channel.toUpperCase()}`);
 }
 
-async function sendDatagram(s1, s2, s3, strength) {
+async function sendDatagram(s1, s2, s3, s4, strength) {
   if (!datagramWriter) return;
   try {
     // Non-blocking write — drop if queue is full (true UDP-like behaviour)
-    await datagramWriter.write(encodePacket(s1, s2, s3, strength));
+    await datagramWriter.write(encodePacket(s1, s2, s3, s4, strength));
     sentCount++;
     sentLastSec++;
     document.getElementById("st-sent").textContent = sentCount;
@@ -390,7 +400,7 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 90, lastS2 = 90, lastS3 = 90, lastStrength = 0;
+let lastS1 = 90, lastS2 = 90, lastS3 = 90, lastS4 = 90, lastStrength = 0;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-VR HUD — once inside the headset the page's status bar/servo bars/log
@@ -476,7 +486,7 @@ function initHud(gl) {
   };
 }
 
-function updateHudTexture(gl, s1, s2, s3, strength) {
+function updateHudTexture(gl, s1, s2, s3, s4, strength) {
   const { ctx, canvas, texture } = hud;
   const wtText = document.getElementById("wt-label").textContent;
   const xrText = document.getElementById("xr-label").textContent;
@@ -495,7 +505,7 @@ function updateHudTexture(gl, s1, s2, s3, strength) {
   ctx.fillStyle = "#e0e0e0";
   ctx.fillText(wtText, 20, 80);
   ctx.fillText(xrText, 20, 108);
-  ctx.fillText(`S1 ${s1}°  S2 ${s2}°  S3 ${s3}°`, 20, 150);
+  ctx.fillText(`S1 ${s1}°  S2 ${s2}°  S3 ${s3}°  S4 ${s4}°`, 20, 150);
   ctx.fillText(`STR ${strength.toFixed(2)}`, 20, 178);
   ctx.fillText(`Sent ${sentCount}   Dropped ${dropCount}`, 20, 206);
 
@@ -617,6 +627,7 @@ function onXRFrame(time, frame) {
   const rightSrc = Array.from(frame.session.inputSources).find(s => s.handedness === "right");
   const trigger   = rightSrc?.gamepad?.buttons?.[0];
   lastStrength    = trigger ? clamp(trigger.value, 0, 1) : 0;
+  lastS4          = triggerToServo(lastStrength);
 
   if (pose) {
     const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
@@ -625,10 +636,10 @@ function onXRFrame(time, frame) {
     lastS3 = yawToServo(roll);
   }
 
-  updateServoUI(lastS1, lastS2, lastS3, lastStrength);
+  updateServoUI(lastS1, lastS2, lastS3, lastS4, lastStrength);
 
   if (time - lastSendTime >= minGap) {
-    sendDatagram(lastS1, lastS2, lastS3, lastStrength);   // fire-and-forget datagram
+    sendDatagram(lastS1, lastS2, lastS3, lastS4, lastStrength);   // fire-and-forget datagram
     lastSendTime = time;
   }
 
@@ -639,7 +650,7 @@ function onXRFrame(time, frame) {
   const viewerPose = frame.getViewerPose(xrRefSpace);
   if (viewerPose && hud) {
     if (time - hud.lastDraw > 150) {
-      updateHudTexture(xrGL, lastS1, lastS2, lastS3, lastStrength);
+      updateHudTexture(xrGL, lastS1, lastS2, lastS3, lastS4, lastStrength);
       hud.lastDraw = time;
     }
     for (const view of viewerPose.views) {
