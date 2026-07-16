@@ -95,10 +95,18 @@ SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4}
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500
 
-# Hard safety cap — servos are never driven past this angle, regardless of
-# what a client requests. Physical range is still 0-180 (see AngularServo
+# Hard safety limits — servos are never driven outside these ranges, regardless
+# of what a client requests. Physical range is still 0-180 (see AngularServo
 # below); this just clamps the usable travel.
-SERVO_MAX_ANGLE = 55
+#   s1 (base)          — full range, no clamp
+#   s2/s3/s4 (joints)  — clamped to ±85° around centre (90°), a few degrees
+#                        short of the mechanical stops
+SERVO_LIMITS = {
+    "s1": (0, 180),
+    "s2": (5, 175),
+    "s3": (5, 175),
+    "s4": (5, 175),
+}
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
@@ -143,7 +151,8 @@ def init_servos():
 
 
 def move_servo(key: str, angle: int):
-    angle = max(0, min(SERVO_MAX_ANGLE, angle))
+    lo, hi = SERVO_LIMITS[key]
+    angle = max(lo, min(hi, angle))
     current_angles[key] = angle
     if not SIMULATE:
         servos[key].angle = angle
@@ -151,11 +160,12 @@ def move_servo(key: str, angle: int):
 
 def cleanup_servos():
     if not SIMULATE:
-        # Centre all servos (within the capped range) on exit so they don't
+        # Centre all servos (within their limits) on exit so they don't
         # hold tension, then release the pins
         for key, servo in servos.items():
             try:
-                servo.angle = SERVO_MAX_ANGLE / 2
+                lo, hi = SERVO_LIMITS[key]
+                servo.angle = (lo + hi) / 2
                 time.sleep(0.3)
                 servo.close()
             except Exception:
@@ -193,15 +203,16 @@ def _release(key: str):
 
 
 def sweep_servo(key: str, delay: float = 0.01):
-    """Blocking sweep 0 -> SERVO_MAX_ANGLE -> 0 — run off the event loop (see run_in_executor call site)."""
+    """Blocking sweep lo -> hi -> lo across this servo's SERVO_LIMITS — run off the event loop (see run_in_executor call site)."""
     if SIMULATE:
         log.info(f"SIMULATE: would sweep servo {key}.")
         return
     if not _claim(key):
         log.info(f"Servo {key.upper()} sweep already running — ignored.")
         return
+    lo, hi = SERVO_LIMITS[key]
     try:
-        for angle in list(range(0, SERVO_MAX_ANGLE + 1, 2)) + list(range(SERVO_MAX_ANGLE, -1, -2)):
+        for angle in list(range(lo, hi + 1, 2)) + list(range(hi, lo - 1, -2)):
             move_servo(key, angle)
             time.sleep(delay)
         log.info(f"Servo {key.upper()} sweep complete.")

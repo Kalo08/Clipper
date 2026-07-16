@@ -251,11 +251,19 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Analog trigger (0=released, 1=fully pulled) drives S4 down from its 90°
 // rest position — fully pulled sends it to 0°.
-const triggerToServo = strength => clamp(Math.round(90 - clamp(strength, 0, 1) * 90), 0, SERVO_MAX_ANGLE);
+// Hard safety limits — matches SERVO_LIMITS in webtransport_servo_bridge.py.
+// Servos are never driven outside these, no matter what the IK solves for.
+//   s1 (base)          — full range, no clamp
+//   s2/s3/s4 (joints)  — clamped to ±85° around centre (90°)
+const SERVO_LIMITS = {
+  s1: [0, 180],
+  s2: [5, 175],
+  s3: [5, 175],
+  s4: [5, 175],
+};
 
-// Hard safety cap — matches SERVO_MAX_ANGLE in webtransport_servo_bridge.py.
-// Servos are never driven past this, no matter what the IK solves for.
-const SERVO_MAX_ANGLE = 55;
+const triggerToServo = strength =>
+  clamp(Math.round(90 - clamp(strength, 0, 1) * 90), ...SERVO_LIMITS.s4);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Inverse kinematics
@@ -303,17 +311,18 @@ function solveIK(hp) {
   const bend  = radToDeg(Math.acos(clamp(d * d / (2 * LINK_LEN * LINK_LEN) - 1, -1, 1)));
   const tilt  = radToDeg(Math.atan2(rHor, dy)) - bend / 2;
 
-  const s1 = Math.round(clamp(az,   0, SERVO_MAX_ANGLE));
-  const s2 = Math.round(clamp(tilt, 0, SERVO_MAX_ANGLE));
-  const s3 = Math.round(clamp(bend, 0, SERVO_MAX_ANGLE));
+  const s1 = Math.round(clamp(az,   ...SERVO_LIMITS.s1));
+  const s2 = Math.round(clamp(tilt, ...SERVO_LIMITS.s2));
+  const s3 = Math.round(clamp(bend, ...SERVO_LIMITS.s3));
 
   // Reachable = no clamp had to meaningfully alter the raw solution
   const T = 2; // tolerance in degrees
+  const inLimits = (v, [lo, hi]) => v > lo - T && v < hi + T;
   const reachable =
     dRaw <= MAX_REACH + 0.02 &&
-    az   > -T && az   < SERVO_MAX_ANGLE + T &&
-    tilt > -T && tilt < SERVO_MAX_ANGLE + T &&
-    bend < SERVO_MAX_ANGLE + T;
+    inLimits(az,   SERVO_LIMITS.s1) &&
+    inLimits(tilt, SERVO_LIMITS.s2) &&
+    inLimits(bend, SERVO_LIMITS.s3);
 
   return { s1, s2, s3, reachable };
 }
@@ -470,7 +479,7 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 0, lastS2 = 0, lastS3 = 0, lastS4 = 55, lastStrength = 0;
+let lastS1 = 0, lastS2 = 5, lastS3 = 5, lastS4 = 90, lastStrength = 0;
 let lastReachable = true;
 let prevRecalPressed = false;   // edge detection for the A/X re-calibrate button
 
