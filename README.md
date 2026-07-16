@@ -7,7 +7,8 @@ https://www.youtube.com/watch?v=h8sehnFcGIc&authuser=0
 
 Heres a YouTube Video explaining how everything works!
 
-<img width="4284" height="5712" alt="IMG_8773" src="https://github.com/user-attachments/assets/142ca42e-fa3c-4ed3-b73e-816b448f3d61" />
+<img width="6048" height="8064" alt="clipper" src="https://github.com/user-attachments/assets/206e67c2-b5a2-40d2-a7ae-669efc0123d3" />
+
 <img width="5712" height="4284" alt="IMG_8768" src="https://github.com/user-attachments/assets/4bfcc626-359d-40ab-8699-c69da485dbc8" />
 
 Here are pictures of the finalized arm! It has the a base that allows it to rotate, move up and down, and stay attached ot teh table. That connects to the elbow which allows us to move the clippers even more. 
