@@ -132,6 +132,16 @@ SERVO_LIMITS = {
     "s4":  (5, 175),
 }
 
+# Servos physically mounted backwards relative to their logical angle (IK,
+# sliders, current_angles — everything upstream stays in "logical" space).
+# Only the final hardware write is flipped (180 - angle), here and nowhere
+# else, so every consumer of an angle continues to reason in the same space.
+SERVO_INVERT = {"s2"}
+
+
+def _phys_angle(key: str, angle: float) -> float:
+    return 180 - angle if key in SERVO_INVERT else angle
+
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
 DIR1_PIN        = 24   # physical pin 18 — A4988 DIR
@@ -178,7 +188,7 @@ def init_servos():
         init_angle = SERVO_INIT.get(key, 0)
         servos[key] = _AngularServo(
             gpio,
-            initial_angle=init_angle,
+            initial_angle=_phys_angle(key, init_angle),
             min_angle=0,
             max_angle=180,
             min_pulse_width=SERVO_MIN_US / 1_000_000,
@@ -230,7 +240,7 @@ def _slew_loop():
                     new = cur + step if tgt > cur else cur - step
                 current_angles[key] = new
                 if not SIMULATE:
-                    servos[key].angle = new
+                    servos[key].angle = _phys_angle(key, new)
 
         for master in history:
             history[master].append(current_angles[master])
@@ -241,7 +251,7 @@ def start_slew_loop():
     global _slew_stop
     _slew_stop = threading.Event()
     threading.Thread(target=_slew_loop, daemon=True, name="servo-slew").start()
-    log.info(f"Servo slew loop started ({SERVO_SLEW_DEG_PER_S}°/s, 100 Hz).")
+    log.info(f"Servo slew loop started ({SERVO_SLEW_DEG_PER_S}°/s, 50 Hz).")
 
 
 def cleanup_servos():
@@ -255,7 +265,7 @@ def cleanup_servos():
         for key, servo in servos.items():
             try:
                 lo, hi = SERVO_LIMITS[key]
-                servo.angle = (lo + hi) / 2
+                servo.angle = _phys_angle(key, (lo + hi) / 2)
                 time.sleep(0.3)
                 servo.close()
             except Exception:
