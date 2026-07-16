@@ -168,20 +168,6 @@ logging.basicConfig(
 log = logging.getLogger("wt-bridge")
 logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
-# Max servo speed in deg/sec. All motion is slew-rate limited to this in a
-# single shared loop, which is what keeps the s2/s2b pair in true lockstep:
-# a physically faster servo can only ever get one tick ahead instead of
-# racing to the target on its own.
-# Kept LOW on purpose: a servo's current draw scales with how far it lags
-# its commanded position, so a gentle slew rate caps the peak current —
-# critical on a weak supply (AA batteries). Raise this once the arm is on a
-# proper 5-6V high-current supply.
-# Floor: below ~50°/s the per-tick step (speed / 50Hz) drops under the
-# servos' ~1° deadband — updates get ignored until they accumulate past it
-# and the motion visibly cogs ("moves in steps"). 60°/s → 1.2°/tick, just
-# above deadband, so each tick registers and motion stays continuous.
-SERVO_SLEW_DEG_PER_S = 60
-
 # ── Servo state ───────────────────────────────────────────────────────────────
 # Bookkeeping must start at the SAME logical angle each servo is actually
 # initialised to (SERVO_INIT), or the slew loop's first move jump-cuts from
@@ -216,24 +202,21 @@ def init_servos():
 
 
 def move_servo(key: str, angle: int):
-    # Master/slave: commands only set TARGETS. The slew loop below owns all
-    # hardware writes, stepping every servo toward its target in shared ticks
-    # so the s2/s2b pair moves in lockstep instead of each servo racing to
-    # the target at its own physical speed. Follower (s2b) targets are set
-    # inside the loop from the master's position history, never here.
+    # Master/slave: commands only set TARGETS. The pose loop below owns all
+    # hardware writes, pushing the latest commanded pose out each tick —
+    # master and follower (s2b) in the same tick, no rate limiting.
     lo, hi = SERVO_LIMITS[key]
     angle = max(lo, min(hi, angle))
     target_angles[key] = angle
 
 
-def _slew_loop():
+def _pose_loop():
     from collections import deque
     # 50 Hz — matches the servo pulse rate. Updating pulse widths faster
     # than the servos consume them (e.g. 100 Hz) risks mid-pulse glitches
     # with software-timed PWM, which shows up as random twitching.
     TICK = 0.02
-    step = SERVO_SLEW_DEG_PER_S * TICK       # max degrees per tick
-    # -1: the loop ordering (target read → step → history append) already
+    # -1: the loop ordering (target read → write → history append) already
     # contributes one tick of inherent lag
     delay_ticks = max(0, round(SERVO_FOLLOWER_DELAY_S / TICK) - 1)
     # Per-master ring buffer of past positions; the oldest entry is the
@@ -243,48 +226,44 @@ def _slew_loop():
                for m in SERVO_FOLLOWERS}
 
     while not _slew_stop.is_set():
-        # Followers chase the master's delayed position, not its live target
+        # Followers chase the master's (possibly delayed) position
         for master, (fkey, transform) in SERVO_FOLLOWERS.items():
             flo, fhi = SERVO_LIMITS[fkey]
             target_angles[fkey] = max(flo, min(fhi,
                 transform(history[master][0]) + SERVO_FOLLOWER_TRIM_DEG))
 
+        # Write the latest pose straight through — no stepping. The servos
+        # hold whatever pose was last written (PWM stays active) until the
+        # next change arrives.
         for key in SERVO_GPIO:
-            cur, tgt = current_angles[key], target_angles[key]
-            if cur != tgt:
-                if abs(tgt - cur) <= step:
-                    new = tgt
-                else:
-                    new = cur + step if tgt > cur else cur - step
-                current_angles[key] = new
+            tgt = target_angles[key]
+            if current_angles[key] != tgt:
+                current_angles[key] = tgt
                 if not SIMULATE:
-                    servos[key].angle = _phys_angle(key, new)
+                    servos[key].angle = _phys_angle(key, tgt)
 
         for master in history:
             history[master].append(current_angles[master])
         time.sleep(TICK)
 
 
-def start_slew_loop():
+def start_pose_loop():
     global _slew_stop
     _slew_stop = threading.Event()
-    threading.Thread(target=_slew_loop, daemon=True, name="servo-slew").start()
-    log.info(f"Servo slew loop started ({SERVO_SLEW_DEG_PER_S}°/s, 50 Hz).")
+    threading.Thread(target=_pose_loop, daemon=True, name="servo-pose").start()
+    log.info("Servo pose loop started (50 Hz, direct pose writes).")
 
 
 def cleanup_servos():
     if not SIMULATE:
-        # Stop the slew loop so it can't race these direct writes, then
-        # centre all servos (within their limits) so they don't hold
-        # tension, and release the pins
+        # Stop the pose loop, then release the pins WITHOUT moving anything —
+        # servos hold their last commanded position while powered and simply
+        # stop receiving pulses where they are.
         if _slew_stop is not None:
             _slew_stop.set()
             time.sleep(0.05)
         for key, servo in servos.items():
             try:
-                lo, hi = SERVO_LIMITS[key]
-                servo.angle = _phys_angle(key, (lo + hi) / 2)
-                time.sleep(0.3)
                 servo.close()
             except Exception:
                 pass
@@ -500,7 +479,7 @@ async def main():
 
     init_servos()
     init_stepper1()
-    start_slew_loop()
+    start_pose_loop()
 
     print(f"\n{'=' * 62}")
     print(f"  WebTransport Servo Bridge  (QUIC / UDP-like datagrams)")
