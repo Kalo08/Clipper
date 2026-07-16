@@ -1,0 +1,1 @@
+This project uses a simple robotic arm driven by servos and controlled by a vr headset / controllers to manipulate hair clippers and cut hair. The headset communicates to a rasberry pi using UDP and sends servo commands.
