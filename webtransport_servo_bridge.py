@@ -99,9 +99,16 @@ SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4, "s2b": 18}
 SERVO_FOLLOWERS = {"s2": ("s2b", lambda a: 180 - a)}
 
 # The follower tracks the master's position from this long ago, tracing the
-# same motion path uniformly time-shifted — compensates for the follower
-# servo physically leading the master.
-SERVO_FOLLOWER_DELAY_S = 0.030
+# same motion path uniformly time-shifted. Only useful for a TRUE timing
+# mismatch — a lead/lag that flips with direction (in sync one way, delayed
+# the other) is an angle offset and needs TRIM below, not delay.
+SERVO_FOLLOWER_DELAY_S = 0.0
+
+# Constant trim added to s2b's mirrored angle, correcting a horn seated a few
+# splines off. In-sync on the outbound sweep but ~doubly-delayed on the return
+# with 30ms delay ≈ 7° of offset (240°/s × 0.03s). If the pair now fights
+# slightly at rest or the asymmetry gets WORSE, flip the sign to +7.0.
+SERVO_FOLLOWER_TRIM_DEG = -7.0
 
 # Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
 SERVO_INIT = {"s2b": 180}
@@ -192,7 +199,7 @@ def _slew_loop():
     step = SERVO_SLEW_DEG_PER_S * TICK       # max degrees per tick
     # -1: the loop ordering (target read → step → history append) already
     # contributes one tick of inherent lag
-    delay_ticks = max(1, round(SERVO_FOLLOWER_DELAY_S / TICK) - 1)
+    delay_ticks = max(0, round(SERVO_FOLLOWER_DELAY_S / TICK) - 1)
     # Per-master ring buffer of past positions; the oldest entry is the
     # master's angle SERVO_FOLLOWER_DELAY_S ago once the buffer fills.
     history = {m: deque([current_angles[m]] * (delay_ticks + 1),
@@ -203,7 +210,8 @@ def _slew_loop():
         # Followers chase the master's delayed position, not its live target
         for master, (fkey, transform) in SERVO_FOLLOWERS.items():
             flo, fhi = SERVO_LIMITS[fkey]
-            target_angles[fkey] = max(flo, min(fhi, transform(history[master][0])))
+            target_angles[fkey] = max(flo, min(fhi,
+                transform(history[master][0]) + SERVO_FOLLOWER_TRIM_DEG))
 
         for key in SERVO_GPIO:
             cur, tgt = current_angles[key], target_angles[key]
