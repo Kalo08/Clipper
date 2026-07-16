@@ -130,8 +130,8 @@ SERVO_MAX_US = 2500
 #                        short of the mechanical stops
 SERVO_LIMITS = {
     "s1":  (0, 180),
-    "s2":  (90, 175),   # 90 = straight up on the physical arm; forward-only
-    "s2b": (5, 90),     # mirrored image of s2's range (180 - [90, 175])
+    "s2":  (5, 90),     # 90 = straight up; angle DECREASES as the arm tips forward
+    "s2b": (90, 175),   # mirrored image of s2's range (180 - [5, 90])
     "s3":  (5, 175),
     "s4":  (5, 175),
 }
