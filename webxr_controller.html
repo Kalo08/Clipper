@@ -400,7 +400,11 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 90, lastS2 = 90, lastS3 = 90, lastS4 = 90, lastStrength = 0;
+let lastS1 = 0, lastS2 = 90, lastS3 = 90, lastS4 = 90, lastStrength = 0;
+let baseAngle = 0;          // S1 (base spin) is driven incrementally by the joystick, not by pose
+let lastFrameTime = null;
+const BASE_SPIN_SPEED = 90; // degrees/sec of base rotation at full stick deflection
+const STICK_DEADZONE   = 0.15;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-VR HUD — once inside the headset the page's status bar/servo bars/log
@@ -629,9 +633,20 @@ function onXRFrame(time, frame) {
   lastStrength    = trigger ? clamp(trigger.value, 0, 1) : 0;
   lastS4          = triggerToServo(lastStrength);
 
+  // Base (S1) spin is driven by the joystick's x-axis instead of hand pose —
+  // pushing the stick rotates the base at a constant rate rather than
+  // snapping to an absolute angle, since a stick has no rest position that
+  // maps naturally onto 0-180°.
+  const dt = lastFrameTime === null ? 0 : (time - lastFrameTime) / 1000;
+  lastFrameTime = time;
+  const axes    = src?.gamepad?.axes || [];
+  let stickX    = axes.length >= 4 ? axes[2] : (axes[0] || 0);
+  if (Math.abs(stickX) < STICK_DEADZONE) stickX = 0;
+  baseAngle = clamp(baseAngle + stickX * BASE_SPIN_SPEED * dt, 0, 180);
+  lastS1    = Math.round(baseAngle);
+
   if (pose) {
-    const [yaw, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
-    lastS1 = yawToServo(yaw);
+    const [, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
     lastS2 = pitchToServo(pitch);
     lastS3 = yawToServo(roll);
   }
