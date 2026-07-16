@@ -163,15 +163,25 @@ def init_servos():
 
 
 def move_servo(key: str, angle: int):
+    # Master/slave: compute BOTH targets first, then write the two hardware
+    # outputs back-to-back with nothing in between, so the slave (s2b) gets
+    # its pulse-width update in the same instant as the master rather than
+    # a full clamp/bookkeeping cycle later.
     lo, hi = SERVO_LIMITS[key]
     angle = max(lo, min(hi, angle))
-    current_angles[key] = angle
-    if not SIMULATE:
-        servos[key].angle = angle
+    writes = [(key, angle)]
+
     follower = SERVO_FOLLOWERS.get(key)
     if follower:
         fkey, transform = follower
-        move_servo(fkey, transform(angle))
+        flo, fhi = SERVO_LIMITS[fkey]
+        writes.append((fkey, max(flo, min(fhi, transform(angle)))))
+
+    if not SIMULATE:
+        for k, a in writes:
+            servos[k].angle = a
+    for k, a in writes:
+        current_angles[k] = a
 
 
 def cleanup_servos():
