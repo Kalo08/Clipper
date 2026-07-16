@@ -1,27 +1,26 @@
 """
 WebTransport (QUIC) → Servo Bridge
 Receives compact binary datagrams from the Meta Quest WebXR page
-and drives servos via a PCA9685 I2C PWM driver on a Raspberry Pi 3.
+and drives servos directly via Pi GPIO PWM (no PCA9685 driver board).
 
 Packet format (matches webxr_controller.html):
     1 byte  → command byte (0x01 = spin stepper 1 one revolution)
     3 bytes → servo angles [S1, S2, S3], each 0-180
-        byte 0 → S1 angle  (0–180)  pan  / yaw    → PCA9685 channel 1
-        byte 1 → S2 angle  (0–180)  tilt / pitch  → PCA9685 channel 2
-        byte 2 → S3 angle  (0–180)  roll           → PCA9685 channel 3
+        byte 0 → S1 angle  (0–180)  pan  / yaw    → GPIO17
+        byte 1 → S2 angle  (0–180)  tilt / pitch  → GPIO27
+        byte 2 → S3 angle  (0–180)  roll           → GPIO22
 
-Wiring (PCA9685 → Pi 3):
-    VCC  → 3.3 V (pin 1)
-    GND  → GND   (pin 6)
-    SDA  → GPIO 2 / SDA1 (pin 3)
-    SCL  → GPIO 3 / SCL1 (pin 5)
-    V+   → 5–6 V external supply for servos
+Wiring (servo → Pi 4):
+    Signal → GPIO17 / GPIO27 / GPIO22 (physical pins 11 / 13 / 15)
+    V+     → 5–6 V external supply for servos (NOT the Pi's 5V pin)
+    GND    → common ground with the Pi
 
 Dependencies (install on the Pi):
-    pip install aioquic adafruit-circuitpython-servokit RPi.GPIO
+    pip install aioquic pigpio RPi.GPIO
 
-Enable I2C on the Pi first:
-    sudo raspi-config → Interface Options → I2C → Enable
+Start the pigpio daemon first (needed for jitter-free servo PWM):
+    sudo apt install -y pigpio python3-pigpio
+    sudo systemctl enable pigpiod --now
 
 Generate your TLS cert first:
     python setup_cert.py
@@ -41,22 +40,24 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── PCA9685 / ServoKit import ─────────────────────────────────────────────────
+# ── pigpio (direct GPIO PWM for servos) ───────────────────────────────────────
 SIMULATE = False
-kit = None
+pi = None
 try:
-    from adafruit_servokit import ServoKit
-    kit = ServoKit(channels=16)
+    import pigpio
+    pi = pigpio.pi()
+    if not pi.connected:
+        raise RuntimeError("pigpiod not running — start with: sudo systemctl start pigpiod")
 except Exception as e:
     SIMULATE = True
-    print(f"[bridge] PCA9685/ServoKit unavailable ({e}) — SIMULATE mode (no servo output).")
+    print(f"[bridge] pigpio unavailable ({e}) — SIMULATE mode (no servo output).")
 
 # ── Stepper GPIO import ───────────────────────────────────────────────────────
 try:
     import RPi.GPIO as GPIO
     GPIO.setmode(GPIO.BCM)
     GPIO.setwarnings(False)
-    _GPIO_OK = not SIMULATE
+    _GPIO_OK = True
 except (ImportError, RuntimeError):
     _GPIO_OK = False
 
@@ -84,8 +85,12 @@ CERT_FILE = Path("cert.pem")
 KEY_FILE  = Path("key.pem")
 WT_PATH   = "/servo"        # Must match the URL in webxr_controller.html
 
-# PCA9685 channel numbers for each servo (0-indexed, matches board labels)
-SERVO_CHANNELS = {"s1": 1, "s2": 2, "s3": 3}
+# GPIO pin (BCM numbering) for each servo's PWM signal wire
+SERVO_GPIO = {"s1": 17, "s2": 27, "s3": 22}
+
+# Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
+SERVO_MIN_US = 500
+SERVO_MAX_US = 2500
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
@@ -110,30 +115,36 @@ pkt_count  = 0
 last_stats = time.monotonic()
 
 
+def angle_to_pulsewidth(angle: int) -> int:
+    angle = max(0, min(180, angle))
+    return int(SERVO_MIN_US + (angle / 180) * (SERVO_MAX_US - SERVO_MIN_US))
+
+
 def init_servos():
     if SIMULATE:
-        log.info("SIMULATE mode — PCA9685 not initialised.")
+        log.info("SIMULATE mode — pigpio not initialised.")
         return
-    for key, ch in SERVO_CHANNELS.items():
-        kit.servo[ch].angle = 90   # centre all servos on startup
-        log.info(f"  PCA9685 ch{ch} → {key.upper()} initialised (90°)")
+    for key, gpio in SERVO_GPIO.items():
+        pi.set_mode(gpio, pigpio.OUTPUT)
+        pi.set_servo_pulsewidth(gpio, angle_to_pulsewidth(90))   # centre all servos on startup
+        log.info(f"  GPIO{gpio} → {key.upper()} initialised (90°)")
 
 
 def move_servo(key: str, angle: int):
     current_angles[key] = angle
     if not SIMULATE:
-        kit.servo[SERVO_CHANNELS[key]].angle = max(0, min(180, angle))
+        pi.set_servo_pulsewidth(SERVO_GPIO[key], angle_to_pulsewidth(angle))
 
 
 def cleanup_servos():
-    if SIMULATE:
-        return
-    # Centre all servos on exit so they don't hold tension
-    for key, ch in SERVO_CHANNELS.items():
-        try:
-            kit.servo[ch].angle = 90
-        except Exception:
-            pass
+    if not SIMULATE:
+        # Centre all servos on exit so they don't hold tension, then release pigpio
+        for key, gpio in SERVO_GPIO.items():
+            try:
+                pi.set_servo_pulsewidth(gpio, angle_to_pulsewidth(90))
+            except Exception:
+                pass
+        pi.stop()
     if _GPIO_OK:
         GPIO.cleanup()
 
@@ -161,7 +172,7 @@ def sweep_servo(key: str, delay: float = 0.01):
 # ── Stepper 1 (A4988) ─────────────────────────────────────────────────────────
 
 def init_stepper1():
-    if SIMULATE:
+    if not _GPIO_OK:
         return
     GPIO.setup(STEP1_PIN, GPIO.OUT)
     GPIO.setup(DIR1_PIN, GPIO.OUT)
@@ -172,7 +183,7 @@ def init_stepper1():
 
 def spin_stepper1(steps: int = STEPPER1_STEPS, delay: float = STEPPER1_DELAY):
     """Blocking step loop — run this off the asyncio event loop (see run_in_executor call site)."""
-    if SIMULATE:
+    if not _GPIO_OK:
         log.info(f"SIMULATE: would spin stepper 1 for {steps} steps.")
         return
     for _ in range(steps):
@@ -302,9 +313,9 @@ async def main():
     print(f"  WebTransport Servo Bridge  (QUIC / UDP-like datagrams)")
     print(f"  Listening on  https://{HOST}:{PORT}{WT_PATH}")
     print(f"  Simulate mode: {SIMULATE}")
-    print(f"\n  PCA9685 servo channel map:")
-    for k, ch in SERVO_CHANNELS.items():
-        print(f"    {k.upper()} → PCA9685 channel {ch}")
+    print(f"\n  Servo GPIO map (BCM numbering):")
+    for k, gpio in SERVO_GPIO.items():
+        print(f"    {k.upper()} → GPIO{gpio}")
     print(f"\n  Stepper 1 (A4988) GPIO map:")
     print(f"    STEP1 → GPIO {STEP1_PIN} (BCM)")
     print(f"    DIR1  → GPIO {DIR1_PIN} (BCM)")
