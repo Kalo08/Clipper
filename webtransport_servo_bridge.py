@@ -95,6 +95,11 @@ SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4}
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500
 
+# Hard safety cap — servos are never driven past this angle, regardless of
+# what a client requests. Physical range is still 0-180 (see AngularServo
+# below); this just clamps the usable travel.
+SERVO_MAX_ANGLE = 55
+
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
 DIR1_PIN        = 24   # physical pin 18 — A4988 DIR
@@ -138,17 +143,19 @@ def init_servos():
 
 
 def move_servo(key: str, angle: int):
+    angle = max(0, min(SERVO_MAX_ANGLE, angle))
     current_angles[key] = angle
     if not SIMULATE:
-        servos[key].angle = max(0, min(180, angle))
+        servos[key].angle = angle
 
 
 def cleanup_servos():
     if not SIMULATE:
-        # Centre all servos on exit so they don't hold tension, then release the pins
+        # Centre all servos (within the capped range) on exit so they don't
+        # hold tension, then release the pins
         for key, servo in servos.items():
             try:
-                servo.angle = 90
+                servo.angle = SERVO_MAX_ANGLE / 2
                 time.sleep(0.3)
                 servo.close()
             except Exception:
@@ -186,7 +193,7 @@ def _release(key: str):
 
 
 def sweep_servo(key: str, delay: float = 0.01):
-    """Blocking sweep 90 -> 0 -> 180 -> 90 — run off the event loop (see run_in_executor call site)."""
+    """Blocking sweep 0 -> SERVO_MAX_ANGLE -> 0 — run off the event loop (see run_in_executor call site)."""
     if SIMULATE:
         log.info(f"SIMULATE: would sweep servo {key}.")
         return
@@ -194,7 +201,7 @@ def sweep_servo(key: str, delay: float = 0.01):
         log.info(f"Servo {key.upper()} sweep already running — ignored.")
         return
     try:
-        for angle in list(range(90, -1, -2)) + list(range(0, 181, 2)) + list(range(180, 89, -2)):
+        for angle in list(range(0, SERVO_MAX_ANGLE + 1, 2)) + list(range(SERVO_MAX_ANGLE, -1, -2)):
             move_servo(key, angle)
             time.sleep(delay)
         log.info(f"Servo {key.upper()} sweep complete.")

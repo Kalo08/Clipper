@@ -251,24 +251,94 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Analog trigger (0=released, 1=fully pulled) drives S4 down from its 90°
 // rest position — fully pulled sends it to 0°.
-const triggerToServo = strength => clamp(Math.round(90 - clamp(strength, 0, 1) * 90), 0, 180);
+const triggerToServo = strength => clamp(Math.round(90 - clamp(strength, 0, 1) * 90), 0, SERVO_MAX_ANGLE);
 
-function quatToEulerDeg(q) {
-  const { x, y, z, w } = q;
-  const roll  = Math.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y));
-  const sinp  = 2*(w*y - z*x);
-  const pitch = Math.abs(sinp) >= 1 ? Math.sign(sinp)*Math.PI/2 : Math.asin(sinp);
-  const yaw   = Math.atan2(2*(w*z + x*y), 1 - 2*(y*y + z*z));
-  const d     = r => r * (180 / Math.PI);
-  return [d(yaw), d(pitch), d(roll)];
+// Hard safety cap — matches SERVO_MAX_ANGLE in webtransport_servo_bridge.py.
+// Servos are never driven past this, no matter what the IK solves for.
+const SERVO_MAX_ANGLE = 55;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inverse kinematics
+//
+// Arm model (all servos zeroed = arm pointing straight up):
+//   S1  base yaw    — spins the whole arm about the vertical axis
+//   S2  shoulder    — tilts link 1 away from vertical
+//   S3  elbow       — bends link 2 relative to link 1
+// Both links are ~10 in (0.254 m). Calibration assumes your hand is resting
+// on the arm's tip (2 links directly above the base) and that you're facing
+// the direction the arm tips toward when S1 = 0.
+// ─────────────────────────────────────────────────────────────────────────────
+const LINK_LEN  = 0.254;                 // metres per link (~10 in)
+const MAX_REACH = 2 * LINK_LEN;
+const radToDeg  = r => r * (180 / Math.PI);
+
+let ikFrame = null;   // {base:[x,y,z], fwd:[x,z], right:[x,z]} — set at calibration
+
+function calibrateIK(handPos, viewFwdX, viewFwdZ) {
+  const n  = Math.hypot(viewFwdX, viewFwdZ) || 1;
+  const fx = viewFwdX / n, fz = viewFwdZ / n;
+  ikFrame = {
+    base:  [handPos.x, handPos.y - MAX_REACH, handPos.z],  // base sits 2 links below the hand
+    fwd:   [fx, fz],          // azimuth 0 = headset's horizontal forward at calibration
+    right: [-fz, fx],         // 90° clockwise from fwd (viewed from above)
+  };
 }
 
-// Gain > 1 means a smaller hand rotation now sweeps the full 0-180 range —
-// i.e. more sensitive than the original 1:1 (±180°/±90°) mapping.
-const YAW_GAIN   = 2.5;
-const PITCH_GAIN = 2.5;
-const yawToServo   = deg => clamp(Math.round(90 + deg * YAW_GAIN), 0, 180);
-const pitchToServo = deg => clamp(Math.round(90 + deg * PITCH_GAIN), 0, 180);
+function solveIK(hp) {
+  const [bx, by, bz] = ikFrame.base;
+  const dx = hp.x - bx, dy = hp.y - by, dz = hp.z - bz;
+
+  // Base yaw: horizontal angle of the target, measured from fwd toward right
+  const az = radToDeg(Math.atan2(
+    dx * ikFrame.right[0] + dz * ikFrame.right[1],
+    dx * ikFrame.fwd[0]   + dz * ikFrame.fwd[1],
+  ));
+
+  // 2-link planar solve in the vertical plane through the target.
+  // Equal link lengths L: d² = 2L²(1 + cos(bend)) and the straight-line
+  // direction to the target bisects the bend, so tilt = φ − bend/2.
+  const rHor  = Math.hypot(dx, dz);
+  const dRaw  = Math.hypot(rHor, dy);
+  const d     = Math.min(dRaw, MAX_REACH);
+  const bend  = radToDeg(Math.acos(clamp(d * d / (2 * LINK_LEN * LINK_LEN) - 1, -1, 1)));
+  const tilt  = radToDeg(Math.atan2(rHor, dy)) - bend / 2;
+
+  const s1 = Math.round(clamp(az,   0, SERVO_MAX_ANGLE));
+  const s2 = Math.round(clamp(tilt, 0, SERVO_MAX_ANGLE));
+  const s3 = Math.round(clamp(bend, 0, SERVO_MAX_ANGLE));
+
+  // Reachable = no clamp had to meaningfully alter the raw solution
+  const T = 2; // tolerance in degrees
+  const reachable =
+    dRaw <= MAX_REACH + 0.02 &&
+    az   > -T && az   < SERVO_MAX_ANGLE + T &&
+    tilt > -T && tilt < SERVO_MAX_ANGLE + T &&
+    bend < SERVO_MAX_ANGLE + T;
+
+  return { s1, s2, s3, reachable };
+}
+
+// Forward kinematics — where the commanded angles put each joint, in world
+// space. Used to render the simulated arm so you can see the commanded pose.
+function fkPoints(s1, s2, s3) {
+  const { base, fwd, right } = ikFrame;
+  const a1 = s1 * Math.PI / 180;
+  const a2 = s2 * Math.PI / 180;
+  const a3 = (s2 + s3) * Math.PI / 180;   // link 2's absolute angle from vertical
+  const dirX = fwd[0] * Math.cos(a1) + right[0] * Math.sin(a1);
+  const dirZ = fwd[1] * Math.cos(a1) + right[1] * Math.sin(a1);
+  const elbow = [
+    base[0] + dirX * LINK_LEN * Math.sin(a2),
+    base[1] +        LINK_LEN * Math.cos(a2),
+    base[2] + dirZ * LINK_LEN * Math.sin(a2),
+  ];
+  const tip = [
+    elbow[0] + dirX * LINK_LEN * Math.sin(a3),
+    elbow[1] +        LINK_LEN * Math.cos(a3),
+    elbow[2] + dirZ * LINK_LEN * Math.sin(a3),
+  ];
+  return { base: [...base], elbow, tip };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebTransport (QUIC datagrams ≈ UDP)
@@ -400,11 +470,9 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 0, lastS2 = 90, lastS3 = 90, lastS4 = 90, lastStrength = 0;
-let baseAngle = 0;          // S1 (base spin) is driven incrementally by the joystick, not by pose
-let lastFrameTime = null;
-const BASE_SPIN_SPEED = 90; // degrees/sec of base rotation at full stick deflection
-const STICK_DEADZONE   = 0.15;
+let lastS1 = 0, lastS2 = 0, lastS3 = 0, lastS4 = 55, lastStrength = 0;
+let lastReachable = true;
+let prevRecalPressed = false;   // edge detection for the A/X re-calibrate button
 
 // ─────────────────────────────────────────────────────────────────────────────
 // In-VR HUD — once inside the headset the page's status bar/servo bars/log
@@ -512,6 +580,14 @@ function updateHudTexture(gl, s1, s2, s3, s4, strength) {
   ctx.fillText(`S1 ${s1}°  S2 ${s2}°  S3 ${s3}°  S4 ${s4}°`, 20, 150);
   ctx.fillText(`STR ${strength.toFixed(2)}`, 20, 178);
   ctx.fillText(`Sent ${sentCount}   Dropped ${dropCount}`, 20, 206);
+  if (!ikFrame)            ctx.fillStyle = "#ffe44e";
+  else if (lastReachable)  ctx.fillStyle = "#4eff91";
+  else                     ctx.fillStyle = "#ff4e4e";
+  ctx.fillText(
+    !ikFrame ? "IK: waiting for hand pose…"
+             : lastReachable ? "IK: target in reach (A = recal)"
+                             : "IK: OUT OF REACH — clamping",
+    20, 234);
 
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
@@ -538,6 +614,79 @@ function drawHud(gl, projectionMatrix) {
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Simulated arm — world-anchored render of the COMMANDED pose (what the servos
+// were just told to do), drawn as lines at the calibrated base position, plus
+// a cross marking the raw hand target. If the arm and the cross drift apart,
+// the target is outside the reachable envelope and the IK is clamping.
+// ─────────────────────────────────────────────────────────────────────────────
+let armViz = null;
+
+function initArmViz(gl) {
+  const vsSrc = `
+    attribute vec3 aPos;
+    uniform mat4 uProj;
+    uniform mat4 uView;
+    void main() {
+      gl_Position = uProj * uView * vec4(aPos, 1.0);
+      gl_PointSize = 12.0;
+    }
+  `;
+  const fsSrc = `
+    precision mediump float;
+    uniform vec4 uColor;
+    void main() { gl_FragColor = uColor; }
+  `;
+  const program = gl.createProgram();
+  gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, vsSrc));
+  gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, fsSrc));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(`Arm viz program link error: ${gl.getProgramInfoLog(program)}`);
+  }
+  armViz = {
+    program,
+    buffer: gl.createBuffer(),
+    aPos:   gl.getAttribLocation(program, "aPos"),
+    uProj:  gl.getUniformLocation(program, "uProj"),
+    uView:  gl.getUniformLocation(program, "uView"),
+    uColor: gl.getUniformLocation(program, "uColor"),
+  };
+}
+
+function _drawVerts(gl, verts, mode, r, g, b, a) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, armViz.buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(armViz.aPos);
+  gl.vertexAttribPointer(armViz.aPos, 3, gl.FLOAT, false, 0, 0);
+  gl.uniform4f(armViz.uColor, r, g, b, a);
+  gl.drawArrays(mode, 0, verts.length / 3);
+}
+
+function drawArm(gl, projectionMatrix, viewMatrix, pts, target, reachable) {
+  gl.useProgram(armViz.program);
+  gl.disable(gl.DEPTH_TEST);
+  gl.disable(gl.CULL_FACE);
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.uniformMatrix4fv(armViz.uProj, false, projectionMatrix);
+  gl.uniformMatrix4fv(armViz.uView, false, viewMatrix);
+
+  // Links: base → elbow → tip (cyan), joints as dots (purple)
+  _drawVerts(gl, [...pts.base, ...pts.elbow, ...pts.elbow, ...pts.tip],
+             gl.LINES, 0.49, 0.95, 1.0, 1.0);
+  _drawVerts(gl, [...pts.base, ...pts.elbow, ...pts.tip],
+             gl.POINTS, 0.65, 0.55, 0.98, 1.0);
+
+  // Hand-target cross — green when reachable, red when the IK is clamping
+  if (target) {
+    const c = 0.03, [x, y, z] = [target.x, target.y, target.z];
+    const cross = [x-c,y,z, x+c,y,z,  x,y-c,z, x,y+c,z,  x,y,z-c, x,y,z+c];
+    if (reachable) _drawVerts(gl, cross, gl.LINES, 0.31, 1.0, 0.57, 1.0);
+    else           _drawVerts(gl, cross, gl.LINES, 1.0, 0.31, 0.31, 1.0);
+  }
+}
+
 const btnEnter = document.getElementById("btn-enter");
 
 btnEnter.addEventListener("click", async () => {
@@ -554,6 +703,7 @@ btnEnter.addEventListener("click", async () => {
     xrGL = canvas.getContext("webgl", { xrCompatible: true, alpha: true });
     await xrGL.makeXRCompatible();
     initHud(xrGL);
+    initArmViz(xrGL);
 
     // "immersive-ar" is what gives passthrough (see-through camera) on Quest —
     // "immersive-vr" is always opaque. Fall back to VR if AR isn't supported.
@@ -587,6 +737,7 @@ btnEnter.addEventListener("click", async () => {
       setDot("xr-dot", "red", "XR: ended", "xr-label");
       btnEnter.disabled = false;
       xrSession = null; xrRefSpace = null; xrGL = null; hud = null;
+      armViz = null; ikFrame = null;   // force a fresh calibration next session
       log("XR session ended.");
     });
 
@@ -633,22 +784,27 @@ function onXRFrame(time, frame) {
   lastStrength    = trigger ? clamp(trigger.value, 0, 1) : 0;
   lastS4          = triggerToServo(lastStrength);
 
-  // Base (S1) spin is driven by the joystick's x-axis instead of hand pose —
-  // pushing the stick rotates the base at a constant rate rather than
-  // snapping to an absolute angle, since a stick has no rest position that
-  // maps naturally onto 0-180°.
-  const dt = lastFrameTime === null ? 0 : (time - lastFrameTime) / 1000;
-  lastFrameTime = time;
-  const axes    = src?.gamepad?.axes || [];
-  let stickX    = axes.length >= 4 ? axes[2] : (axes[0] || 0);
-  if (Math.abs(stickX) < STICK_DEADZONE) stickX = 0;
-  baseAngle = clamp(baseAngle + stickX * BASE_SPIN_SPEED * dt, 0, 180);
-  lastS1    = Math.round(baseAngle);
+  const viewerPose = frame.getViewerPose(xrRefSpace);
+  const handPos    = pose ? pose.transform.position : null;
 
-  if (pose) {
-    const [, pitch, roll] = quatToEulerDeg(pose.transform.orientation);
-    lastS2 = pitchToServo(pitch);
-    lastS3 = yawToServo(roll);
+  // Calibrate on the first tracked hand pose — hold your hand on the arm's
+  // tip (arm zeroed, straight up) facing the arm's S1=0 tip-over direction.
+  // Press A (or X on left controller) any time to re-calibrate.
+  const recalPressed = src?.gamepad?.buttons?.[4]?.pressed || false;
+  if (handPos && viewerPose && (!ikFrame || (recalPressed && !prevRecalPressed))) {
+    // Column-major pose matrix: forward = -Z axis = -(m[8], m[9], m[10])
+    const m = viewerPose.transform.matrix;
+    calibrateIK(handPos, -m[8], -m[10]);
+    log(`IK calibrated — base assumed ${MAX_REACH.toFixed(2)}m below hand, facing your forward.`);
+  }
+  prevRecalPressed = recalPressed;
+
+  // IK: solve joint angles so the arm's tip chases the hand's position
+  // relative to the calibrated base. No pose this frame → hold last angles.
+  if (handPos && ikFrame) {
+    const ik = solveIK(handPos);
+    lastS1 = ik.s1; lastS2 = ik.s2; lastS3 = ik.s3;
+    lastReachable = ik.reachable;
   }
 
   updateServoUI(lastS1, lastS2, lastS3, lastS4, lastStrength);
@@ -662,16 +818,20 @@ function onXRFrame(time, frame) {
   // always see connection/tracking status from inside the headset — a
   // missing controller pose should show up as "stuck at last value" on the
   // HUD, not as a dark, silent screen.
-  const viewerPose = frame.getViewerPose(xrRefSpace);
   if (viewerPose && hud) {
     if (time - hud.lastDraw > 150) {
       updateHudTexture(xrGL, lastS1, lastS2, lastS3, lastS4, lastStrength);
       hud.lastDraw = time;
     }
+    const armPts = (ikFrame && armViz) ? fkPoints(lastS1, lastS2, lastS3) : null;
     for (const view of viewerPose.views) {
       const vp = layer.getViewport(view);
       xrGL.viewport(vp.x, vp.y, vp.width, vp.height);
       drawHud(xrGL, view.projectionMatrix);
+      if (armPts) {
+        drawArm(xrGL, view.projectionMatrix, view.transform.inverse.matrix,
+                armPts, handPos, lastReachable);
+      }
     }
   }
 }
