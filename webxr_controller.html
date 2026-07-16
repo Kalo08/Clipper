@@ -195,13 +195,16 @@
     <button id="btn-spin-s3" class="primary" disabled>Spin S3</button>
   </div>
 
-  <!-- ── Manual sliders (per linkage) ───────────────── -->
+  <!-- ── Manual sliders (per linkage) ───────────────────────────────────
+       Dead simple: slider value IS the servo angle. Left end = the zeroed
+       pose (same as zero_servos.py), drag right = angle increases.
+       S1 starts centred (90) because that's its "facing forward" pose. -->
   <div class="card">
     <h2>Manual Control</h2>
     <div class="servo-row">
       <span class="servo-label">S1</span>
-      <input type="range" class="servo-slider" id="slider-s1" min="0" max="180" value="0" />
-      <span class="servo-val" id="slval-s1">0°</span>
+      <input type="range" class="servo-slider" id="slider-s1" min="0" max="180" value="90" />
+      <span class="servo-val" id="slval-s1">90°</span>
     </div>
     <div class="servo-row">
       <span class="servo-label">S2</span>
@@ -264,17 +267,22 @@ function updateServoUI(s1, s2, s3, s4, strength) {
 
   document.getElementById("bar-str").style.width = `${strength * 100}%`;
   document.getElementById("val-str").textContent  = strength.toFixed(2);
-  syncSliders(s1, s2, s3, s4);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Packet encoding
-// Uses compact binary: 5 bytes [s1, s2, s3, s4, strength] — smallest possible datagram
+// Compact binary: 6 bytes [seq, s1, s2, s3, s4, strength].
+// seq is a wrapping counter — QUIC datagrams arrive unordered, so without it
+// a stale mid-drag packet can arrive AFTER the final position and overwrite
+// it (the arm "randomly" lands on some angle from earlier in the drag).
+// The bridge discards packets whose seq is behind the newest seen.
 // strength (0-1) is packed into a single byte (0-255)
 // ─────────────────────────────────────────────────────────────────────────────
+let packetSeq = 0;
 function encodePacket(s1, s2, s3, s4, strength) {
   const str8 = Math.round(clamp(strength, 0, 1) * 255);
-  return new Uint8Array([s1 & 0xFF, s2 & 0xFF, s3 & 0xFF, s4 & 0xFF, str8 & 0xFF]);
+  packetSeq = (packetSeq + 1) & 0xFF;
+  return new Uint8Array([packetSeq, s1 & 0xFF, s2 & 0xFF, s3 & 0xFF, s4 & 0xFF, str8 & 0xFF]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +424,7 @@ let datagramWriter = null;
 let sentCount    = 0;
 let dropCount    = 0;
 let rateTimer    = null;
+let keepaliveTimer = null;
 let sentLastSec  = 0;
 
 async function connectWT() {
@@ -472,6 +481,15 @@ async function connectWT() {
       sentLastSec = 0;
     }, 1000);
 
+    // Keepalive: datagrams are unreliable, and outside AR the sliders only
+    // send while being dragged — if the final packet of a drag is lost, the
+    // arm would stick at a stale mid-drag angle forever. Re-sending current
+    // state at 10 Hz makes any drop heal within 100ms. (In AR the frame
+    // loop already streams at full rate, so skip it there.)
+    keepaliveTimer = setInterval(() => {
+      if (!xrSession) sendDatagram(lastS1, lastS2, lastS3, lastS4, lastStrength);
+    }, 100);
+
   } catch (err) {
     log(`Connection failed: ${err.message}`);
     setDot("wt-dot", "red", "WebTransport: failed", "wt-label");
@@ -487,6 +505,7 @@ function onDisconnect() {
   transport      = null;
   datagramWriter = null;
   clearInterval(rateTimer);
+  clearInterval(keepaliveTimer);
   setDot("wt-dot", "red", "WebTransport: disconnected", "wt-label");
   document.getElementById("btn-connect").disabled    = false;
   document.getElementById("btn-disconnect").disabled = true;
@@ -532,38 +551,23 @@ document.getElementById("btn-spin-s2").addEventListener("click", () => spinServo
 document.getElementById("btn-spin-s3").addEventListener("click", () => spinServo("s3"));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Manual sliders — one per linkage. Drive the servos directly when you're NOT
-// in AR (bench testing); once an XR session is streaming IK angles, the IK
-// overwrites these each frame. S2B has no slider: the bridge mirrors it
-// from S2 automatically.
+// Manual sliders — one per linkage, dead simple: slider value IS the servo
+// angle. Each slider drives only its own servo. The 10 Hz keepalive delivers
+// the state, so drops heal on their own; no per-input throttling needed.
+// S2B has no slider: the bridge mirrors it from S2 automatically.
+// (In AR the IK stream overwrites these — sliders are for bench testing.)
 // ─────────────────────────────────────────────────────────────────────────────
-let sliderSendPending = null;
-
-function onSliderInput() {
-  lastS1 = parseInt(document.getElementById("slider-s1").value);
-  lastS2 = parseInt(document.getElementById("slider-s2").value);
-  lastS3 = parseInt(document.getElementById("slider-s3").value);
-  lastS4 = parseInt(document.getElementById("slider-s4").value);
-  updateServoUI(lastS1, lastS2, lastS3, lastS4, lastStrength);
-  // Throttle to ~30 Hz, but always deliver the final position
-  if (!sliderSendPending) {
-    sliderSendPending = setTimeout(() => {
-      sliderSendPending = null;
-      sendDatagram(lastS1, lastS2, lastS3, lastS4, lastStrength);
-    }, 33);
-  }
-}
-
-function syncSliders(s1, s2, s3, s4) {
-  const pairs = [["s1", s1], ["s2", s2], ["s3", s3], ["s4", s4]];
-  for (const [key, val] of pairs) {
-    document.getElementById(`slider-${key}`).value = val;
-    document.getElementById(`slval-${key}`).textContent = `${val}°`;
-  }
-}
-
 for (const key of ["s1", "s2", "s3", "s4"]) {
-  document.getElementById(`slider-${key}`).addEventListener("input", onSliderInput);
+  document.getElementById(`slider-${key}`).addEventListener("input", (e) => {
+    const angle = parseInt(e.target.value);
+    document.getElementById(`slval-${key}`).textContent = `${angle}°`;
+    if (key === "s1") lastS1 = angle;
+    if (key === "s2") lastS2 = angle;
+    if (key === "s3") lastS3 = angle;
+    if (key === "s4") lastS4 = angle;
+    updateServoUI(lastS1, lastS2, lastS3, lastS4, lastStrength);
+    sendDatagram(lastS1, lastS2, lastS3, lastS4, lastStrength);
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -573,7 +577,10 @@ let xrSession  = null;
 let xrRefSpace = null;
 let lastSendTime = 0;
 let xrGL = null;
-let lastS1 = 0, lastS2 = 5, lastS3 = 5, lastS4 = 90, lastStrength = 0;
+// Must match the bridge's startup pose (SERVO_INIT / zeroed arm) — the 10 Hz
+// keepalive starts sending these the moment you connect, so a mismatch here
+// would physically move the arm on connect.
+let lastS1 = 90, lastS2 = 5, lastS3 = 5, lastS4 = 90, lastStrength = 0;
 let lastReachable = true;
 let prevRecalPressed = false;   // edge detection for the A/X re-calibrate button
 

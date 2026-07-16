@@ -365,13 +365,22 @@ def spin_stepper1(steps: int = STEPPER1_STEPS, delay: float = STEPPER1_DELAY):
         _release("stepper1")
 
 
+_last_seq = None
+
+
 def handle_packet(data: bytes):
     """
     Decode an incoming datagram.
       1 byte  -> command byte (0x01 = spin stepper 1 one revolution)
-      3 bytes -> servo angle packet [s1, s2, s3]
+      6 bytes -> servo angle packet [seq, s1, s2, s3, s4, strength]
+
+    seq is a wrapping 0-255 counter. QUIC datagrams arrive unordered, so a
+    stale mid-motion packet can land AFTER the newest one — without this
+    check it would overwrite the final position with an earlier angle.
+    Packets more than half the wrap window behind the newest seen are
+    discarded as stale.
     """
-    global pkt_count
+    global pkt_count, _last_seq
 
     if len(data) == 1:
         cmd = data[0]
@@ -384,10 +393,17 @@ def handle_packet(data: bytes):
             asyncio.get_event_loop().run_in_executor(None, sweep_servo, key)
         return
 
-    if len(data) < 4:
+    if len(data) < 6:
         return
 
-    s1, s2, s3, s4 = data[0], data[1], data[2], data[3]
+    seq = data[0]
+    if _last_seq is not None:
+        ahead = (seq - _last_seq) & 0xFF
+        if ahead == 0 or ahead > 128:   # duplicate or stale (arrived late)
+            return
+    _last_seq = seq
+
+    s1, s2, s3, s4 = data[1], data[2], data[3], data[4]
 
     # Validate range — ignore garbage
     if not (0 <= s1 <= 180 and 0 <= s2 <= 180 and 0 <= s3 <= 180 and 0 <= s4 <= 180):
