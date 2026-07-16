@@ -1,0 +1,9 @@
+Item,Qty,Unit Price (USD),Line Total (USD),Notes
+Raspberry Pi 4 (4GB),1,55.00,55.00,MSRP; 2GB ~$45 / 8GB ~$75
+SG90 Micro Servo,3,4.00,12.00,~$3-5 each; often cheaper in multipacks
+Hair Trimmer,1,25.00,25.00,Price provided
+Aluminum Extrusion (2020 T-slot 1m),1,12.00,12.00,Varies by profile and length
+Battery Pack (USB power bank),1,15.00,15.00,~10000mAh; Pi 4 needs 5V/3A output
+Breadboard (830-point),1,5.00,5.00,Half-size ~$3
+Jumper Wires (120pc M-M/M-F/F-F kit),1,6.00,6.00,Mixed kit
+Total,,,130.00,
