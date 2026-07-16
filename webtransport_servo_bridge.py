@@ -134,8 +134,16 @@ logging.basicConfig(
 log = logging.getLogger("wt-bridge")
 logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
+# Max servo speed in deg/sec. All motion is slew-rate limited to this in a
+# single shared loop, which is what keeps the s2/s2b pair in true lockstep:
+# a physically faster servo can only ever get one 10ms tick (~2.4°) ahead
+# instead of racing to the target on its own.
+SERVO_SLEW_DEG_PER_S = 240
+
 # ── Servo state ───────────────────────────────────────────────────────────────
 current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
+target_angles  = dict(current_angles)
+_slew_stop = None   # threading.Event, created when the slew loop starts
 
 # Stats
 pkt_count  = 0
@@ -163,31 +171,54 @@ def init_servos():
 
 
 def move_servo(key: str, angle: int):
-    # Master/slave: compute BOTH targets first, then write the two hardware
-    # outputs back-to-back with nothing in between, so the slave (s2b) gets
-    # its pulse-width update in the same instant as the master rather than
-    # a full clamp/bookkeeping cycle later.
+    # Master/slave: commands only set TARGETS. The slew loop below owns all
+    # hardware writes, stepping every servo toward its target in shared ticks
+    # so the s2/s2b pair moves in lockstep instead of each servo racing to
+    # the target at its own physical speed.
     lo, hi = SERVO_LIMITS[key]
     angle = max(lo, min(hi, angle))
-    writes = [(key, angle)]
+    target_angles[key] = angle
 
     follower = SERVO_FOLLOWERS.get(key)
     if follower:
         fkey, transform = follower
         flo, fhi = SERVO_LIMITS[fkey]
-        writes.append((fkey, max(flo, min(fhi, transform(angle)))))
+        target_angles[fkey] = max(flo, min(fhi, transform(angle)))
 
-    if not SIMULATE:
-        for k, a in writes:
-            servos[k].angle = a
-    for k, a in writes:
-        current_angles[k] = a
+
+def _slew_loop():
+    TICK = 0.01                              # 100 Hz
+    step = SERVO_SLEW_DEG_PER_S * TICK       # max degrees per tick
+    while not _slew_stop.is_set():
+        for key in SERVO_GPIO:
+            cur, tgt = current_angles[key], target_angles[key]
+            if cur == tgt:
+                continue
+            if abs(tgt - cur) <= step:
+                new = tgt
+            else:
+                new = cur + step if tgt > cur else cur - step
+            current_angles[key] = new
+            if not SIMULATE:
+                servos[key].angle = new
+        time.sleep(TICK)
+
+
+def start_slew_loop():
+    global _slew_stop
+    _slew_stop = threading.Event()
+    threading.Thread(target=_slew_loop, daemon=True, name="servo-slew").start()
+    log.info(f"Servo slew loop started ({SERVO_SLEW_DEG_PER_S}°/s, 100 Hz).")
 
 
 def cleanup_servos():
     if not SIMULATE:
-        # Centre all servos (within their limits) on exit so they don't
-        # hold tension, then release the pins
+        # Stop the slew loop so it can't race these direct writes, then
+        # centre all servos (within their limits) so they don't hold
+        # tension, and release the pins
+        if _slew_stop is not None:
+            _slew_stop.set()
+            time.sleep(0.05)
         for key, servo in servos.items():
             try:
                 lo, hi = SERVO_LIMITS[key]
@@ -392,6 +423,7 @@ async def main():
 
     init_servos()
     init_stepper1()
+    start_slew_loop()
 
     print(f"\n{'=' * 62}")
     print(f"  WebTransport Servo Bridge  (QUIC / UDP-like datagrams)")
