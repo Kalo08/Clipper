@@ -84,6 +84,13 @@
 
     .btn-row { display: flex; gap: 10px; width: 100%; max-width: 440px; }
 
+    .servo-slider {
+      flex: 1; height: 26px;
+      accent-color: #7df3ff;
+      cursor: pointer;
+      touch-action: none;   /* keeps the page from scrolling while dragging */
+    }
+
     button {
       flex: 1;
       padding: 11px;
@@ -188,6 +195,31 @@
     <button id="btn-spin-s3" class="primary" disabled>Spin S3</button>
   </div>
 
+  <!-- ── Manual sliders (per linkage) ───────────────── -->
+  <div class="card">
+    <h2>Manual Control</h2>
+    <div class="servo-row">
+      <span class="servo-label">S1</span>
+      <input type="range" class="servo-slider" id="slider-s1" min="0" max="180" value="0" />
+      <span class="servo-val" id="slval-s1">0°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S2</span>
+      <input type="range" class="servo-slider" id="slider-s2" min="5" max="175" value="5" />
+      <span class="servo-val" id="slval-s2">5°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S3</span>
+      <input type="range" class="servo-slider" id="slider-s3" min="5" max="175" value="5" />
+      <span class="servo-val" id="slval-s3">5°</span>
+    </div>
+    <div class="servo-row">
+      <span class="servo-label">S4</span>
+      <input type="range" class="servo-slider" id="slider-s4" min="5" max="175" value="90" />
+      <span class="servo-val" id="slval-s4">90°</span>
+    </div>
+  </div>
+
   <!-- ── Stats ─────────────────────────────────────── -->
   <div id="stats">
     <span>Sent: <b id="st-sent">0</b></span>
@@ -232,6 +264,7 @@ function updateServoUI(s1, s2, s3, s4, strength) {
 
   document.getElementById("bar-str").style.width = `${strength * 100}%`;
   document.getElementById("val-str").textContent  = strength.toFixed(2);
+  syncSliders(s1, s2, s3, s4);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -497,6 +530,41 @@ document.getElementById("btn-disconnect").addEventListener("click", disconnectWT
 document.getElementById("btn-spin-s1").addEventListener("click", () => spinServo("s1"));
 document.getElementById("btn-spin-s2").addEventListener("click", () => spinServo("s2"));
 document.getElementById("btn-spin-s3").addEventListener("click", () => spinServo("s3"));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manual sliders — one per linkage. Drive the servos directly when you're NOT
+// in AR (bench testing); once an XR session is streaming IK angles, the IK
+// overwrites these each frame. S2B has no slider: the bridge mirrors it
+// from S2 automatically.
+// ─────────────────────────────────────────────────────────────────────────────
+let sliderSendPending = null;
+
+function onSliderInput() {
+  lastS1 = parseInt(document.getElementById("slider-s1").value);
+  lastS2 = parseInt(document.getElementById("slider-s2").value);
+  lastS3 = parseInt(document.getElementById("slider-s3").value);
+  lastS4 = parseInt(document.getElementById("slider-s4").value);
+  updateServoUI(lastS1, lastS2, lastS3, lastS4, lastStrength);
+  // Throttle to ~30 Hz, but always deliver the final position
+  if (!sliderSendPending) {
+    sliderSendPending = setTimeout(() => {
+      sliderSendPending = null;
+      sendDatagram(lastS1, lastS2, lastS3, lastS4, lastStrength);
+    }, 33);
+  }
+}
+
+function syncSliders(s1, s2, s3, s4) {
+  const pairs = [["s1", s1], ["s2", s2], ["s3", s3], ["s4", s4]];
+  for (const [key, val] of pairs) {
+    document.getElementById(`slider-${key}`).value = val;
+    document.getElementById(`slval-${key}`).textContent = `${val}°`;
+  }
+}
+
+for (const key of ["s1", "s2", "s3", "s4"]) {
+  document.getElementById(`slider-${key}`).addEventListener("input", onSliderInput);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebXR session
