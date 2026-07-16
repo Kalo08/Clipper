@@ -40,17 +40,17 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# ── pigpio (direct GPIO PWM for servos) ───────────────────────────────────────
+# ── gpiozero / lgpio (direct GPIO PWM for servos) ─────────────────────────────
 SIMULATE = False
-pi = None
+_AngularServo = None
 try:
-    import pigpio
-    pi = pigpio.pi()
-    if not pi.connected:
-        raise RuntimeError("pigpiod not running — start with: sudo systemctl start pigpiod")
+    from gpiozero import AngularServo, Device
+    from gpiozero.pins.lgpio import LGPIOFactory
+    Device.pin_factory = LGPIOFactory()
+    _AngularServo = AngularServo
 except Exception as e:
     SIMULATE = True
-    print(f"[bridge] pigpio unavailable ({e}) — SIMULATE mode (no servo output).")
+    print(f"[bridge] gpiozero/lgpio unavailable ({e}) — SIMULATE mode (no servo output).")
 
 # ── Stepper GPIO import ───────────────────────────────────────────────────────
 try:
@@ -115,36 +115,41 @@ pkt_count  = 0
 last_stats = time.monotonic()
 
 
-def angle_to_pulsewidth(angle: int) -> int:
-    angle = max(0, min(180, angle))
-    return int(SERVO_MIN_US + (angle / 180) * (SERVO_MAX_US - SERVO_MIN_US))
+servos = {}   # key -> AngularServo instance, populated by init_servos()
 
 
 def init_servos():
     if SIMULATE:
-        log.info("SIMULATE mode — pigpio not initialised.")
+        log.info("SIMULATE mode — gpiozero not initialised.")
         return
     for key, gpio in SERVO_GPIO.items():
-        pi.set_mode(gpio, pigpio.OUTPUT)
-        pi.set_servo_pulsewidth(gpio, angle_to_pulsewidth(90))   # centre all servos on startup
+        servos[key] = _AngularServo(
+            gpio,
+            initial_angle=90,
+            min_angle=0,
+            max_angle=180,
+            min_pulse_width=SERVO_MIN_US / 1_000_000,
+            max_pulse_width=SERVO_MAX_US / 1_000_000,
+        )
         log.info(f"  GPIO{gpio} → {key.upper()} initialised (90°)")
 
 
 def move_servo(key: str, angle: int):
     current_angles[key] = angle
     if not SIMULATE:
-        pi.set_servo_pulsewidth(SERVO_GPIO[key], angle_to_pulsewidth(angle))
+        servos[key].angle = max(0, min(180, angle))
 
 
 def cleanup_servos():
     if not SIMULATE:
-        # Centre all servos on exit so they don't hold tension, then release pigpio
-        for key, gpio in SERVO_GPIO.items():
+        # Centre all servos on exit so they don't hold tension, then release the pins
+        for key, servo in servos.items():
             try:
-                pi.set_servo_pulsewidth(gpio, angle_to_pulsewidth(90))
+                servo.angle = 90
+                time.sleep(0.3)
+                servo.close()
             except Exception:
                 pass
-        pi.stop()
     if _GPIO_OK:
         GPIO.cleanup()
 
