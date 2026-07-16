@@ -12,7 +12,7 @@ Heres a YouTube Video explaining how everything works!
 
 Here are pictures of the finalized arm! It has the a base that allows it to rotate, move up and down, and stay attached ot teh table. That connects to the elbow which allows us to move the clippers even more. 
 
-
+Wiring: The Pi is powered and connects to the servos. The Pi communicates to our computer. The computer facilitates it comunication with the VR head set. When the VR headset communicates to the Pi, and this tells the pi to activates the servos. The code tells the servos which ones need to go to keep in sync with the VR.
 
 
 | Item | Qty | Unit Price (USD) | Line Total (USD) | Notes |
