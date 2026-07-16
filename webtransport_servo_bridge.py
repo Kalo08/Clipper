@@ -111,11 +111,12 @@ SERVO_FOLLOWER_DELAY_S = 0.0
 # direction, the same way every sweep.
 SERVO_FOLLOWER_TRIM_DEG = 0.0
 
-# Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
+# Startup pose per servo (defaults to 0).
 # s1 starts centred (90 = "facing forward" once calibrated) rather than at
 # its 0 default — with the s1 mirror below, initial_angle=0 would otherwise
 # swing the base to its opposite physical extreme for no reason at cold start.
-SERVO_INIT = {"s2b": 180, "s1": 90}
+# s2 starts at 90 = arm straight up; s2b mirrors that as 180 - 90 = 90.
+SERVO_INIT = {"s1": 90, "s2": 90, "s2b": 90}
 
 # Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
 SERVO_MIN_US = 500
@@ -129,8 +130,8 @@ SERVO_MAX_US = 2500
 #                        short of the mechanical stops
 SERVO_LIMITS = {
     "s1":  (0, 180),
-    "s2":  (5, 175),
-    "s2b": (5, 175),
+    "s2":  (90, 175),   # 90 = straight up on the physical arm; forward-only
+    "s2b": (5, 90),     # mirrored image of s2's range (180 - [90, 175])
     "s3":  (5, 175),
     "s4":  (5, 175),
 }

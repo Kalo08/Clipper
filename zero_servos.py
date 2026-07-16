@@ -29,9 +29,11 @@ except Exception as e:
 # s1 -> pin 13, s2 -> pin 11, s3 -> pin 15, s4 -> pin 7, s2b -> pin 12
 SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4, "s2b": 18}
 
-# Angle each servo holds in the zeroed pose (s2b mirrors s2: 180 - 0, plus
-# the same trim as SERVO_FOLLOWER_TRIM_DEG in the bridge — keep them in sync)
-ZERO_ANGLES = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
+# Angle each servo holds in the zeroed pose. S2's straight-up is at 90 on the
+# physical arm (forward-only from there); s2b mirrors it (180 - 90 = 90).
+# S1 rests centred at 90 ("facing forward"). Keep in sync with SERVO_INIT in
+# webtransport_servo_bridge.py.
+ZERO_ANGLES = {"s1": 90, "s2": 90, "s3": 0, "s4": 0, "s2b": 90}
 
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500

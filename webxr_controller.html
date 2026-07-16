@@ -208,8 +208,8 @@
     </div>
     <div class="servo-row">
       <span class="servo-label">S2</span>
-      <input type="range" class="servo-slider" id="slider-s2" min="5" max="175" value="5" />
-      <span class="servo-val" id="slval-s2">5°</span>
+      <input type="range" class="servo-slider" id="slider-s2" min="90" max="175" value="90" />
+      <span class="servo-val" id="slval-s2">90°</span>
     </div>
     <div class="servo-row">
       <span class="servo-label">S3</span>
@@ -298,7 +298,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 //   s2/s3/s4 (joints)  — clamped to ±85° around centre (90°)
 const SERVO_LIMITS = {
   s1: [0, 180],
-  s2: [5, 175],
+  s2: [90, 175],   // 90 = straight up on the physical arm; forward-only from there
   s3: [5, 175],
   s4: [5, 175],
 };
@@ -373,9 +373,12 @@ function solveIK(hp) {
   // but the elbow bend computed for the UNCLAMPED shoulder is then stale and
   // the tip lands nowhere near the target. So: pin the shoulder at its limit
   // and re-aim link 2 straight at the target from where the elbow actually is.
+  // tilt is geometry-space (0 = link 1 vertical); the servo's 90 = vertical,
+  // so its limits translate to tilt-space by subtracting 90.
   const [s2lo, s2hi] = SERVO_LIMITS.s2;
-  if (tilt < s2lo || tilt > s2hi) {
-    tilt = clamp(tilt, s2lo, s2hi);
+  const tiltLo = s2lo - 90, tiltHi = s2hi - 90;
+  if (tilt < tiltLo || tilt > tiltHi) {
+    tilt = clamp(tilt, tiltLo, tiltHi);
     const a2 = tilt * Math.PI / 180;
     const er = LINK1_LEN * Math.sin(a2);   // elbow position, in-plane (r, y)
     const ey = LINK1_LEN * Math.cos(a2);
@@ -385,9 +388,9 @@ function solveIK(hp) {
     bend = ((bend % 360) + 540) % 360 - 180;
   }
 
-  const s1 = Math.round(clamp(az,   ...SERVO_LIMITS.s1));
-  const s2 = Math.round(clamp(tilt, ...SERVO_LIMITS.s2));
-  const s3 = Math.round(clamp(bend, ...SERVO_LIMITS.s3));
+  const s1 = Math.round(clamp(az,        ...SERVO_LIMITS.s1));
+  const s2 = Math.round(clamp(90 + tilt, ...SERVO_LIMITS.s2));   // servo 90 = straight up
+  const s3 = Math.round(clamp(bend,      ...SERVO_LIMITS.s3));
 
   // Reachable = no clamp had to meaningfully alter the raw solution
   // (tiltRaw, not the pinned tilt — pinning IS a clamp and should show red)
@@ -395,9 +398,9 @@ function solveIK(hp) {
   const inLimits = (v, [lo, hi]) => v > lo - T && v < hi + T;
   const reachable =
     dRaw <= MAX_REACH + 0.02 &&
-    inLimits(az,      SERVO_LIMITS.s1) &&
-    inLimits(tiltRaw, SERVO_LIMITS.s2) &&
-    inLimits(bend,    SERVO_LIMITS.s3);
+    inLimits(az,           SERVO_LIMITS.s1) &&
+    inLimits(90 + tiltRaw, SERVO_LIMITS.s2) &&
+    inLimits(bend,         SERVO_LIMITS.s3);
 
   return { s1, s2, s3, reachable };
 }
@@ -407,8 +410,8 @@ function solveIK(hp) {
 function fkPoints(s1, s2, s3) {
   const { base, fwd, right } = ikFrame;
   const a1 = (s1 - 90) * Math.PI / 180;   // undo solveIK's 90°-centred servo mapping
-  const a2 = s2 * Math.PI / 180;
-  const a3 = (s2 + s3) * Math.PI / 180;   // link 2's absolute angle from vertical
+  const a2 = (s2 - 90) * Math.PI / 180;   // servo 90 = link 1 vertical
+  const a3 = (s2 - 90 + s3) * Math.PI / 180;   // link 2's absolute angle from vertical
   const dirX = fwd[0] * Math.cos(a1) + right[0] * Math.sin(a1);
   const dirZ = fwd[1] * Math.cos(a1) + right[1] * Math.sin(a1);
   const elbow = [
@@ -587,8 +590,8 @@ let lastSendTime = 0;
 let xrGL = null;
 // Must match the bridge's startup pose (SERVO_INIT / zeroed arm) — the 10 Hz
 // keepalive starts sending these the moment you connect, so a mismatch here
-// would physically move the arm on connect.
-let lastS1 = 90, lastS2 = 5, lastS3 = 5, lastS4 = 90, lastStrength = 0;
+// would physically move the arm on connect. S2's 90 = straight up.
+let lastS1 = 90, lastS2 = 90, lastS3 = 5, lastS4 = 90, lastStrength = 0;
 let lastReachable = true;
 let prevRecalPressed = false;   // edge detection for the A/X re-calibrate button
 
