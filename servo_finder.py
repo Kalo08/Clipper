@@ -28,7 +28,7 @@ CANDIDATES = [
     (17, 11),   # bridge S2 — joint on base
     (22, 15),   # bridge S3
     (4,   7),   # bridge S4 — trigger-driven
-    (18, 12),   # neighbour of pin 11 (same row)
+    (18, 12),   # bridge S2B — second shoulder servo (mirrored follower of S2)
     (10, 19),   # below pin 15's area
     (9,  21),
     (11, 23),

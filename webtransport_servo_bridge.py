@@ -14,6 +14,7 @@ Packet format (matches webxr_controller.html):
 
 Wiring (servo → Pi 4):
     Signal → GPIO27 / GPIO17 / GPIO22 / GPIO4 (physical pins 13 / 11 / 15 / 7)
+    S2B (second shoulder servo, mirrored follower of S2) → GPIO18 (physical pin 12)
     V+     → 5–6 V external supply for servos (NOT the Pi's 5V pin)
     GND    → common ground with the Pi
 
@@ -89,7 +90,16 @@ KEY_FILE  = Path("key.pem")
 WT_PATH   = "/servo"        # Must match the URL in webxr_controller.html
 
 # GPIO pin (BCM numbering) for each servo's PWM signal wire
-SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4}
+SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4, "s2b": 18}
+
+# s2b is a second shoulder servo mounted on the OPPOSITE side of the joint
+# from s2, driving the first linkage in unison with it. Because it faces the
+# other way it always follows s2 at the mirrored angle (180 - s2) — driving
+# both to the same angle would make them fight each other and stall.
+SERVO_FOLLOWERS = {"s2": ("s2b", lambda a: 180 - a)}
+
+# Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
+SERVO_INIT = {"s2b": 180}
 
 # Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
 SERVO_MIN_US = 500
@@ -102,10 +112,11 @@ SERVO_MAX_US = 2500
 #   s2/s3/s4 (joints)  — clamped to ±85° around centre (90°), a few degrees
 #                        short of the mechanical stops
 SERVO_LIMITS = {
-    "s1": (0, 180),
-    "s2": (5, 175),
-    "s3": (5, 175),
-    "s4": (5, 175),
+    "s1":  (0, 180),
+    "s2":  (5, 175),
+    "s2b": (5, 175),
+    "s3":  (5, 175),
+    "s4":  (5, 175),
 }
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
@@ -124,7 +135,7 @@ log = logging.getLogger("wt-bridge")
 logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
 # ── Servo state ───────────────────────────────────────────────────────────────
-current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0}
+current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
 
 # Stats
 pkt_count  = 0
@@ -139,15 +150,16 @@ def init_servos():
         log.info("SIMULATE mode — gpiozero not initialised.")
         return
     for key, gpio in SERVO_GPIO.items():
+        init_angle = SERVO_INIT.get(key, 0)
         servos[key] = _AngularServo(
             gpio,
-            initial_angle=0,
+            initial_angle=init_angle,
             min_angle=0,
             max_angle=180,
             min_pulse_width=SERVO_MIN_US / 1_000_000,
             max_pulse_width=SERVO_MAX_US / 1_000_000,
         )
-        log.info(f"  GPIO{gpio} → {key.upper()} initialised (0°)")
+        log.info(f"  GPIO{gpio} → {key.upper()} initialised ({init_angle}°)")
 
 
 def move_servo(key: str, angle: int):
@@ -156,6 +168,10 @@ def move_servo(key: str, angle: int):
     current_angles[key] = angle
     if not SIMULATE:
         servos[key].angle = angle
+    follower = SERVO_FOLLOWERS.get(key)
+    if follower:
+        fkey, transform = follower
+        move_servo(fkey, transform(angle))
 
 
 def cleanup_servos():

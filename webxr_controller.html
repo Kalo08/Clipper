@@ -314,21 +314,41 @@ function solveIK(hp) {
   const rHor  = Math.hypot(dx, dz);
   const dRaw  = Math.hypot(rHor, dy);
   const d     = Math.min(dRaw, MAX_REACH);
-  const bend  = radToDeg(Math.acos(clamp(d * d / (2 * LINK_LEN * LINK_LEN) - 1, -1, 1)));
-  const tilt  = radToDeg(Math.atan2(rHor, dy)) - bend / 2;
+  const phi   = radToDeg(Math.atan2(rHor, dy));   // target direction, 0 = straight up
+  let bend    = radToDeg(Math.acos(clamp(d * d / (2 * LINK_LEN * LINK_LEN) - 1, -1, 1)));
+  let tilt    = phi - bend / 2;
+  const tiltRaw = tilt;
+
+  // Close-in targets ("inside" the arm) solve to a shoulder angle past its
+  // limit. Leaning link 1 back as far as the joint allows is the right move,
+  // but the elbow bend computed for the UNCLAMPED shoulder is then stale and
+  // the tip lands nowhere near the target. So: pin the shoulder at its limit
+  // and re-aim link 2 straight at the target from where the elbow actually is.
+  const [s2lo, s2hi] = SERVO_LIMITS.s2;
+  if (tilt < s2lo || tilt > s2hi) {
+    tilt = clamp(tilt, s2lo, s2hi);
+    const a2 = tilt * Math.PI / 180;
+    const er = LINK_LEN * Math.sin(a2);   // elbow position, in-plane (r, y)
+    const ey = LINK_LEN * Math.cos(a2);
+    bend = radToDeg(Math.atan2(rHor - er, dy - ey)) - tilt;
+    // Normalize to (-180, 180] — targets that need link 2 folded back past
+    // straight-down otherwise wrap to ~-360 and clamp to the WRONG extreme
+    bend = ((bend % 360) + 540) % 360 - 180;
+  }
 
   const s1 = Math.round(clamp(az,   ...SERVO_LIMITS.s1));
   const s2 = Math.round(clamp(tilt, ...SERVO_LIMITS.s2));
   const s3 = Math.round(clamp(bend, ...SERVO_LIMITS.s3));
 
   // Reachable = no clamp had to meaningfully alter the raw solution
+  // (tiltRaw, not the pinned tilt — pinning IS a clamp and should show red)
   const T = 2; // tolerance in degrees
   const inLimits = (v, [lo, hi]) => v > lo - T && v < hi + T;
   const reachable =
     dRaw <= MAX_REACH + 0.02 &&
-    inLimits(az,   SERVO_LIMITS.s1) &&
-    inLimits(tilt, SERVO_LIMITS.s2) &&
-    inLimits(bend, SERVO_LIMITS.s3);
+    inLimits(az,      SERVO_LIMITS.s1) &&
+    inLimits(tiltRaw, SERVO_LIMITS.s2) &&
+    inLimits(bend,    SERVO_LIMITS.s3);
 
   return { s1, s2, s3, reachable };
 }
