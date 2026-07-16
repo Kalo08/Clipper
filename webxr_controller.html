@@ -296,11 +296,17 @@ function solveIK(hp) {
   const [bx, by, bz] = ikFrame.base;
   const dx = hp.x - bx, dy = hp.y - by, dz = hp.z - bz;
 
-  // Base yaw: horizontal angle of the target, measured from fwd toward right
-  const az = radToDeg(Math.atan2(
+  // Base yaw: horizontal angle of the target, measured from fwd toward right.
+  // atan2 returns -180..180 (negative = target is to the left of fwd) — a
+  // servo only spans 0..180, so re-centre it: servo 90° = facing fwd,
+  // servo 0..90 = swung left, servo 90..180 = swung right. Without this
+  // offset, any target left of fwd (negative az) clamps straight to 0 and
+  // the base looks "stuck," never swinging that direction at all.
+  const azRaw = radToDeg(Math.atan2(
     dx * ikFrame.right[0] + dz * ikFrame.right[1],
     dx * ikFrame.fwd[0]   + dz * ikFrame.fwd[1],
   ));
+  const az = 90 + azRaw;
 
   // 2-link planar solve in the vertical plane through the target.
   // Equal link lengths L: d² = 2L²(1 + cos(bend)) and the straight-line
@@ -331,7 +337,7 @@ function solveIK(hp) {
 // space. Used to render the simulated arm so you can see the commanded pose.
 function fkPoints(s1, s2, s3) {
   const { base, fwd, right } = ikFrame;
-  const a1 = s1 * Math.PI / 180;
+  const a1 = (s1 - 90) * Math.PI / 180;   // undo solveIK's 90°-centred servo mapping
   const a2 = s2 * Math.PI / 180;
   const a3 = (s2 + s3) * Math.PI / 180;   // link 2's absolute angle from vertical
   const dirX = fwd[0] * Math.cos(a1) + right[0] * Math.sin(a1);
