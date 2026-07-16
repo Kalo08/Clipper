@@ -98,6 +98,11 @@ SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22, "s4": 4, "s2b": 18}
 # both to the same angle would make them fight each other and stall.
 SERVO_FOLLOWERS = {"s2": ("s2b", lambda a: 180 - a)}
 
+# The follower tracks the master's position from this long ago, tracing the
+# same motion path uniformly time-shifted — compensates for the follower
+# servo physically leading the master.
+SERVO_FOLLOWER_DELAY_S = 0.030
+
 # Startup pose per servo (defaults to 0). s2b mirrors s2's 0° as 180°.
 SERVO_INIT = {"s2b": 180}
 
@@ -174,33 +179,45 @@ def move_servo(key: str, angle: int):
     # Master/slave: commands only set TARGETS. The slew loop below owns all
     # hardware writes, stepping every servo toward its target in shared ticks
     # so the s2/s2b pair moves in lockstep instead of each servo racing to
-    # the target at its own physical speed.
+    # the target at its own physical speed. Follower (s2b) targets are set
+    # inside the loop from the master's position history, never here.
     lo, hi = SERVO_LIMITS[key]
     angle = max(lo, min(hi, angle))
     target_angles[key] = angle
 
-    follower = SERVO_FOLLOWERS.get(key)
-    if follower:
-        fkey, transform = follower
-        flo, fhi = SERVO_LIMITS[fkey]
-        target_angles[fkey] = max(flo, min(fhi, transform(angle)))
-
 
 def _slew_loop():
+    from collections import deque
     TICK = 0.01                              # 100 Hz
     step = SERVO_SLEW_DEG_PER_S * TICK       # max degrees per tick
+    # -1: the loop ordering (target read → step → history append) already
+    # contributes one tick of inherent lag
+    delay_ticks = max(1, round(SERVO_FOLLOWER_DELAY_S / TICK) - 1)
+    # Per-master ring buffer of past positions; the oldest entry is the
+    # master's angle SERVO_FOLLOWER_DELAY_S ago once the buffer fills.
+    history = {m: deque([current_angles[m]] * (delay_ticks + 1),
+                        maxlen=delay_ticks + 1)
+               for m in SERVO_FOLLOWERS}
+
     while not _slew_stop.is_set():
+        # Followers chase the master's delayed position, not its live target
+        for master, (fkey, transform) in SERVO_FOLLOWERS.items():
+            flo, fhi = SERVO_LIMITS[fkey]
+            target_angles[fkey] = max(flo, min(fhi, transform(history[master][0])))
+
         for key in SERVO_GPIO:
             cur, tgt = current_angles[key], target_angles[key]
-            if cur == tgt:
-                continue
-            if abs(tgt - cur) <= step:
-                new = tgt
-            else:
-                new = cur + step if tgt > cur else cur - step
-            current_angles[key] = new
-            if not SIMULATE:
-                servos[key].angle = new
+            if cur != tgt:
+                if abs(tgt - cur) <= step:
+                    new = tgt
+                else:
+                    new = cur + step if tgt > cur else cur - step
+                current_angles[key] = new
+                if not SIMULATE:
+                    servos[key].angle = new
+
+        for master in history:
+            history[master].append(current_angles[master])
         time.sleep(TICK)
 
 
