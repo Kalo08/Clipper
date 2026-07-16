@@ -149,9 +149,13 @@ logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 
 # Max servo speed in deg/sec. All motion is slew-rate limited to this in a
 # single shared loop, which is what keeps the s2/s2b pair in true lockstep:
-# a physically faster servo can only ever get one 10ms tick (~2.4°) ahead
-# instead of racing to the target on its own.
-SERVO_SLEW_DEG_PER_S = 240
+# a physically faster servo can only ever get one tick ahead instead of
+# racing to the target on its own.
+# Kept LOW on purpose: a servo's current draw scales with how far it lags
+# its commanded position, so a gentle slew rate caps the peak current —
+# critical on a weak supply (AA batteries). Raise this once the arm is on a
+# proper 5-6V high-current supply.
+SERVO_SLEW_DEG_PER_S = 70
 
 # ── Servo state ───────────────────────────────────────────────────────────────
 current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
