@@ -132,15 +132,16 @@ SERVO_LIMITS = {
     "s4":  (5, 175),
 }
 
-# Servos physically mounted backwards relative to their logical angle (IK,
-# sliders, current_angles — everything upstream stays in "logical" space).
-# Only the final hardware write is flipped (180 - angle), here and nowhere
-# else, so every consumer of an angle continues to reason in the same space.
-SERVO_INVERT = {"s2"}
-
-
-def _phys_angle(key: str, angle: float) -> float:
-    return 180 - angle if key in SERVO_INVERT else angle
+# NOTE: a global "reverse s2's direction" mirror (angle -> 180 - angle) was
+# tried here and reverted — logical angle 0 is confirmed to be the arm's
+# straight-up rest pose (via zero_servos.py), and mirroring the whole 0-180
+# range necessarily moves that reference to the opposite physical extreme
+# (logical 0 -> physical 180), which is NOT "up". A true full-range direction
+# reversal is mathematically incompatible with keeping 0 fixed at "up" — any
+# monotonically-decreasing map from [0,180] onto [0,180] forces f(0)=180.
+# If S2 still moves the "wrong" way, the real fix has to be mechanical
+# (re-seat the horn a spline or two) or a narrower, non-mirroring correction —
+# not a global software flip.
 
 # A4988 stepper driver — stepper 1 (BCM numbering)
 STEP1_PIN       = 23   # physical pin 16 — A4988 STEP
@@ -165,7 +166,7 @@ logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 # its commanded position, so a gentle slew rate caps the peak current —
 # critical on a weak supply (AA batteries). Raise this once the arm is on a
 # proper 5-6V high-current supply.
-SERVO_SLEW_DEG_PER_S = 70
+SERVO_SLEW_DEG_PER_S = 20
 
 # ── Servo state ───────────────────────────────────────────────────────────────
 current_angles = {"s1": 0, "s2": 0, "s3": 0, "s4": 0, "s2b": 180}
@@ -188,7 +189,7 @@ def init_servos():
         init_angle = SERVO_INIT.get(key, 0)
         servos[key] = _AngularServo(
             gpio,
-            initial_angle=_phys_angle(key, init_angle),
+            initial_angle=init_angle,
             min_angle=0,
             max_angle=180,
             min_pulse_width=SERVO_MIN_US / 1_000_000,
@@ -240,7 +241,7 @@ def _slew_loop():
                     new = cur + step if tgt > cur else cur - step
                 current_angles[key] = new
                 if not SIMULATE:
-                    servos[key].angle = _phys_angle(key, new)
+                    servos[key].angle = new
 
         for master in history:
             history[master].append(current_angles[master])
@@ -265,7 +266,7 @@ def cleanup_servos():
         for key, servo in servos.items():
             try:
                 lo, hi = SERVO_LIMITS[key]
-                servo.angle = _phys_angle(key, (lo + hi) / 2)
+                servo.angle = (lo + hi) / 2
                 time.sleep(0.3)
                 servo.close()
             except Exception:
