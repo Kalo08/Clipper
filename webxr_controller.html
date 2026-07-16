@@ -313,12 +313,14 @@ const triggerToServo = strength =>
 //   S1  base yaw    — spins the whole arm about the vertical axis
 //   S2  shoulder    — tilts link 1 away from vertical
 //   S3  elbow       — bends link 2 relative to link 1
-// Both links are ~10 in (0.254 m). Calibration assumes your hand is resting
-// on the arm's tip (2 links directly above the base) and that you're facing
-// the direction the arm tips toward when S1 = 0.
+// Link 1 (shoulder→elbow) is 138mm, link 2 (elbow→tip) is 120mm. Calibration
+// assumes your hand is resting on the arm's tip (both links stacked directly
+// above the base) and that you're facing the direction the arm tips toward
+// when S1 = 0.
 // ─────────────────────────────────────────────────────────────────────────────
-const LINK_LEN  = 0.254;                 // metres per link (~10 in)
-const MAX_REACH = 2 * LINK_LEN;
+const LINK1_LEN = 0.138;                 // metres, shoulder → elbow
+const LINK2_LEN = 0.120;                 // metres, elbow → tip
+const MAX_REACH = LINK1_LEN + LINK2_LEN;
 const radToDeg  = r => r * (180 / Math.PI);
 
 let ikFrame = null;   // {base:[x,y,z], fwd:[x,z], right:[x,z]} — set at calibration
@@ -327,7 +329,7 @@ function calibrateIK(handPos, viewFwdX, viewFwdZ) {
   const n  = Math.hypot(viewFwdX, viewFwdZ) || 1;
   const fx = viewFwdX / n, fz = viewFwdZ / n;
   ikFrame = {
-    base:  [handPos.x, handPos.y - MAX_REACH, handPos.z],  // base sits 2 links below the hand
+    base:  [handPos.x, handPos.y - MAX_REACH, handPos.z],  // base sits both links below the hand
     fwd:   [fx, fz],          // azimuth 0 = headset's horizontal forward at calibration
     right: [-fz, fx],         // 90° clockwise from fwd (viewed from above)
   };
@@ -349,15 +351,21 @@ function solveIK(hp) {
   ));
   const az = 90 + azRaw;
 
-  // 2-link planar solve in the vertical plane through the target.
-  // Equal link lengths L: d² = 2L²(1 + cos(bend)) and the straight-line
-  // direction to the target bisects the bend, so tilt = φ − bend/2.
+  // 2-link planar solve in the vertical plane through the target (general
+  // unequal-links form). With the elbow angle measured as deviation from
+  // straight: d² = L1² + L2² + 2·L1·L2·cos(bend), and the shoulder tilt is
+  // the target direction minus the angle link 1 makes with the base→tip line.
   const rHor  = Math.hypot(dx, dz);
   const dRaw  = Math.hypot(rHor, dy);
   const d     = Math.min(dRaw, MAX_REACH);
   const phi   = radToDeg(Math.atan2(rHor, dy));   // target direction, 0 = straight up
-  let bend    = radToDeg(Math.acos(clamp(d * d / (2 * LINK_LEN * LINK_LEN) - 1, -1, 1)));
-  let tilt    = phi - bend / 2;
+  const cosB  = clamp((d * d - LINK1_LEN ** 2 - LINK2_LEN ** 2) / (2 * LINK1_LEN * LINK2_LEN), -1, 1);
+  let bend    = radToDeg(Math.acos(cosB));
+  const bendRad = bend * Math.PI / 180;
+  let tilt    = phi - radToDeg(Math.atan2(
+    LINK2_LEN * Math.sin(bendRad),
+    LINK1_LEN + LINK2_LEN * Math.cos(bendRad),
+  ));
   const tiltRaw = tilt;
 
   // Close-in targets ("inside" the arm) solve to a shoulder angle past its
@@ -369,8 +377,8 @@ function solveIK(hp) {
   if (tilt < s2lo || tilt > s2hi) {
     tilt = clamp(tilt, s2lo, s2hi);
     const a2 = tilt * Math.PI / 180;
-    const er = LINK_LEN * Math.sin(a2);   // elbow position, in-plane (r, y)
-    const ey = LINK_LEN * Math.cos(a2);
+    const er = LINK1_LEN * Math.sin(a2);   // elbow position, in-plane (r, y)
+    const ey = LINK1_LEN * Math.cos(a2);
     bend = radToDeg(Math.atan2(rHor - er, dy - ey)) - tilt;
     // Normalize to (-180, 180] — targets that need link 2 folded back past
     // straight-down otherwise wrap to ~-360 and clamp to the WRONG extreme
@@ -404,14 +412,14 @@ function fkPoints(s1, s2, s3) {
   const dirX = fwd[0] * Math.cos(a1) + right[0] * Math.sin(a1);
   const dirZ = fwd[1] * Math.cos(a1) + right[1] * Math.sin(a1);
   const elbow = [
-    base[0] + dirX * LINK_LEN * Math.sin(a2),
-    base[1] +        LINK_LEN * Math.cos(a2),
-    base[2] + dirZ * LINK_LEN * Math.sin(a2),
+    base[0] + dirX * LINK1_LEN * Math.sin(a2),
+    base[1] +        LINK1_LEN * Math.cos(a2),
+    base[2] + dirZ * LINK1_LEN * Math.sin(a2),
   ];
   const tip = [
-    elbow[0] + dirX * LINK_LEN * Math.sin(a3),
-    elbow[1] +        LINK_LEN * Math.cos(a3),
-    elbow[2] + dirZ * LINK_LEN * Math.sin(a3),
+    elbow[0] + dirX * LINK2_LEN * Math.sin(a3),
+    elbow[1] +        LINK2_LEN * Math.cos(a3),
+    elbow[2] + dirZ * LINK2_LEN * Math.sin(a3),
   ];
   return { base: [...base], elbow, tip };
 }

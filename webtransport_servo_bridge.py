@@ -176,7 +176,11 @@ logging.getLogger("aioquic").setLevel(logging.WARNING)   # silence QUIC noise
 # its commanded position, so a gentle slew rate caps the peak current —
 # critical on a weak supply (AA batteries). Raise this once the arm is on a
 # proper 5-6V high-current supply.
-SERVO_SLEW_DEG_PER_S = 20
+# Floor: below ~50°/s the per-tick step (speed / 50Hz) drops under the
+# servos' ~1° deadband — updates get ignored until they accumulate past it
+# and the motion visibly cogs ("moves in steps"). 60°/s → 1.2°/tick, just
+# above deadband, so each tick registers and motion stays continuous.
+SERVO_SLEW_DEG_PER_S = 60
 
 # ── Servo state ───────────────────────────────────────────────────────────────
 # Bookkeeping must start at the SAME logical angle each servo is actually
