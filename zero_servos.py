@@ -22,7 +22,8 @@ except Exception as e:
     raise SystemExit(1)
 
 # Must match SERVO_GPIO in webtransport_servo_bridge.py
-SERVO_GPIO = {"s1": 17, "s2": 18, "s3": 22}
+# s1 -> physical pin 13, s2 -> physical pin 11, s3 -> physical pin 15
+SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22}
 
 SERVO_MIN_US = 500
 SERVO_MAX_US = 2500

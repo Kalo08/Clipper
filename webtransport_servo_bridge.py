@@ -6,12 +6,12 @@ and drives servos directly via Pi GPIO PWM (no PCA9685 driver board).
 Packet format (matches webxr_controller.html):
     1 byte  → command byte (0x01 = spin stepper 1 one revolution)
     3 bytes → servo angles [S1, S2, S3], each 0-180
-        byte 0 → S1 angle  (0–180)  base rotation (pan / yaw)        → GPIO17
-        byte 1 → S2 angle  (0–180)  joint on base (tilt / pitch)     → GPIO18
-        byte 2 → S3 angle  (0–180)  roll                             → GPIO22
+        byte 0 → S1 angle  (0–180)  base rotation (pan / yaw)        → GPIO27 (physical pin 13)
+        byte 1 → S2 angle  (0–180)  joint on base (tilt / pitch)     → GPIO17 (physical pin 11)
+        byte 2 → S3 angle  (0–180)  roll                             → GPIO22 (physical pin 15)
 
 Wiring (servo → Pi 4):
-    Signal → GPIO17 / GPIO18 / GPIO22 (physical pins 11 / 12 / 15)
+    Signal → GPIO27 / GPIO17 / GPIO22 (physical pins 13 / 11 / 15)
     V+     → 5–6 V external supply for servos (NOT the Pi's 5V pin)
     GND    → common ground with the Pi
 
@@ -87,7 +87,7 @@ KEY_FILE  = Path("key.pem")
 WT_PATH   = "/servo"        # Must match the URL in webxr_controller.html
 
 # GPIO pin (BCM numbering) for each servo's PWM signal wire
-SERVO_GPIO = {"s1": 17, "s2": 18, "s3": 22}
+SERVO_GPIO = {"s1": 27, "s2": 17, "s3": 22}
 
 # Pulse width range for 0-180 degrees (microseconds) — standard hobby servo range
 SERVO_MIN_US = 500
