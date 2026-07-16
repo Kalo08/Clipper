@@ -36,6 +36,7 @@ import asyncio
 import logging
 import signal
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -162,16 +163,41 @@ def bar(a: int, w: int = 16) -> str:
 # ── Per-channel servo "spin" test ────────────────────────────────────────────
 SERVO_SPIN_CMDS = {0x02: "s1", 0x03: "s2", 0x04: "s3"}
 
+# Guards against overlapping motions: pressing a spin button twice (or angle
+# packets streaming in mid-sweep) would otherwise interleave two writers on
+# the same servo, which shows up as erratic continuous sweeping.
+_busy_lock = threading.Lock()
+_busy: set[str] = set()
+
+
+def _claim(key: str) -> bool:
+    with _busy_lock:
+        if key in _busy:
+            return False
+        _busy.add(key)
+        return True
+
+
+def _release(key: str):
+    with _busy_lock:
+        _busy.discard(key)
+
 
 def sweep_servo(key: str, delay: float = 0.01):
     """Blocking sweep 90 -> 0 -> 180 -> 90 — run off the event loop (see run_in_executor call site)."""
     if SIMULATE:
         log.info(f"SIMULATE: would sweep servo {key}.")
         return
-    for angle in list(range(90, -1, -2)) + list(range(0, 181, 2)) + list(range(180, 89, -2)):
-        move_servo(key, angle)
-        time.sleep(delay)
-    log.info(f"Servo {key.upper()} sweep complete.")
+    if not _claim(key):
+        log.info(f"Servo {key.upper()} sweep already running — ignored.")
+        return
+    try:
+        for angle in list(range(90, -1, -2)) + list(range(0, 181, 2)) + list(range(180, 89, -2)):
+            move_servo(key, angle)
+            time.sleep(delay)
+        log.info(f"Servo {key.upper()} sweep complete.")
+    finally:
+        _release(key)
 
 
 # ── Stepper 1 (A4988) ─────────────────────────────────────────────────────────
@@ -191,12 +217,18 @@ def spin_stepper1(steps: int = STEPPER1_STEPS, delay: float = STEPPER1_DELAY):
     if not _GPIO_OK:
         log.info(f"SIMULATE: would spin stepper 1 for {steps} steps.")
         return
-    for _ in range(steps):
-        GPIO.output(STEP1_PIN, GPIO.HIGH)
-        time.sleep(delay)
-        GPIO.output(STEP1_PIN, GPIO.LOW)
-        time.sleep(delay)
-    log.info(f"Stepper 1 spun {steps} steps.")
+    if not _claim("stepper1"):
+        log.info("Stepper 1 already spinning — ignored.")
+        return
+    try:
+        for _ in range(steps):
+            GPIO.output(STEP1_PIN, GPIO.HIGH)
+            time.sleep(delay)
+            GPIO.output(STEP1_PIN, GPIO.LOW)
+            time.sleep(delay)
+        log.info(f"Stepper 1 spun {steps} steps.")
+    finally:
+        _release("stepper1")
 
 
 def handle_packet(data: bytes):
@@ -227,9 +259,10 @@ def handle_packet(data: bytes):
     if not (0 <= s1 <= 180 and 0 <= s2 <= 180 and 0 <= s3 <= 180):
         return
 
-    move_servo("s1", s1)
-    move_servo("s2", s2)
-    move_servo("s3", s3)
+    # Skip servos mid-sweep so streamed angles don't fight the sweep loop
+    for key, val in (("s1", s1), ("s2", s2), ("s3", s3)):
+        if key not in _busy:
+            move_servo(key, val)
     pkt_count += 1
 
     # Print live status every 30 packets instead of every packet
